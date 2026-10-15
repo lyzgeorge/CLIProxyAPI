@@ -175,7 +175,7 @@ routing:
   #     request only while keeping the session bound to its original credential; quota and auth
   #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
   # Ignored when routing.session-affinity is false.
-  session-affinity-rebind-on: "any"
+  session-affinity-rebind-on: "quota"
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
@@ -232,7 +232,7 @@ requests:
   # never engage. The bound applies only during the TLS handshake and is lifted once it
   # succeeds, so inference and long-running streams are never time-limited.
   # Set to 0 to disable (default).
-  tls-handshake-timeout-seconds: 0
+  tls-handshake-timeout-seconds: 30
 
   # When true, forward filtered upstream response headers to downstream clients.
   # Default is false (disabled).
@@ -1039,6 +1039,7 @@ oauth:
 
     # Codex provider behavior.
     codex:
+      preserve-native-client-identity: true
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
@@ -1074,7 +1075,7 @@ oauth:
       # does not send the header. `user-agent` applies to HTTP and websocket requests;
       # `beta-features` only applies to websocket requests. They do not apply to api-keys.codex entries.
       # header-defaults:
-      #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
+      #   user-agent: "codex-tui/0.160.0 (Mac OS 15.7.9; arm64) Apple_Terminal (codex-tui; 0.160.0)"
       #   beta-features: "multi_agent"
 
     # Antigravity provider behavior.
@@ -1111,7 +1112,7 @@ multimedia:
   # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
   # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
   # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
-  disable-image-generation: false
+  disable-image-generation: passthrough
 
   # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
   # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
