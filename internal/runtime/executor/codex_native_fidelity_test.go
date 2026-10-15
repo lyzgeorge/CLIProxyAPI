@@ -251,3 +251,56 @@ func TestCodexHeadersPreserveNativeIdentityAcrossTransports(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexWebsocketHeadersMirrorNativeSessionHeaders(t *testing.T) {
+	const nativeUA = "codex-tui/0.160.0 (Mac OS 15.7.9; arm64) Apple_Terminal (codex-tui; 0.160.0)"
+	const threadID = "01a13fb6-8653-7b32-8359-6c989bddff45"
+	disabled := false
+	for _, tc := range []struct {
+		name       string
+		preserve   *bool
+		userAgent  string
+		originator string
+		mirrored   bool
+	}{
+		{"native identity mirrors client session headers", nil, nativeUA, "codex-tui", true},
+		{"preservation disabled keeps proxy session headers", &disabled, nativeUA, "codex-tui", false},
+		{"third-party identity keeps proxy session headers", nil, "my-proxy/1.0.0", "my-proxy", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: tc.preserve}}
+			client := http.Header{}
+			client.Set("User-Agent", tc.userAgent)
+			client.Set("Originator", tc.originator)
+			client.Set("Session-Id", threadID)
+			client.Set("Thread-Id", threadID)
+			client.Set("X-Codex-Window-Id", threadID+":0")
+			// Mirrors prepareCodexWebsocketRequest, which seeds the proxy-derived session headers first.
+			seeded := http.Header{}
+			setHeaderCasePreserved(seeded, "session_id", threadID)
+			seeded.Set("Conversation_id", threadID)
+			auth := &cliproxyauth.Auth{Provider: "codex"}
+			got := applyCodexWebsocketHeaders(context.Background(), seeded, auth, "fixture-token", cfg, false, client)
+
+			if tc.mirrored {
+				for key, want := range map[string]string{"Session-Id": threadID, "Thread-Id": threadID, "X-Codex-Window-Id": threadID + ":0"} {
+					if values, ok := got[key]; !ok || len(values) != 1 || values[0] != want {
+						t.Errorf("%s = %q, want %q sent verbatim", key, values, want)
+					}
+				}
+				for _, key := range []string{"session_id", "Conversation_id"} {
+					if _, ok := got[key]; ok {
+						t.Errorf("proxy-derived %s should not be sent alongside native session headers: %v", key, got)
+					}
+				}
+				return
+			}
+			if headerValueCaseInsensitive(got, "session_id") != threadID || got.Get("Conversation_id") != threadID {
+				t.Errorf("proxy session headers lost: %v", got)
+			}
+			if got.Get("Thread-Id") != "" || got.Get("X-Codex-Window-Id") != "" {
+				t.Errorf("client thread headers unexpectedly forwarded: %v", got)
+			}
+		})
+	}
+}
