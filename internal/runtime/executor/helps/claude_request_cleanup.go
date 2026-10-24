@@ -9,14 +9,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// StripClaudeRequestMarkers removes billing CCH and thinking block binding before
-// user payload rules run. Other billing fields and ordinary prompt text survive.
+// StripClaudeRequestMarkers removes billing CCH before user payload rules run.
+// Other billing fields, thinking controls, and ordinary prompt text survive.
 func StripClaudeRequestMarkers(body []byte) []byte {
-	if gjson.GetBytes(body, "thinking.block_binding").Exists() {
-		if updated, errDelete := sjson.DeleteBytes(body, "thinking.block_binding"); errDelete == nil {
-			body = updated
-		}
-	}
 	stripText := func(path string, text string) {
 		cleaned := stripClaudeBillingCCH(text)
 		if cleaned != text {

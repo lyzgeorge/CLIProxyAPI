@@ -1335,8 +1335,8 @@ func TestClaudeExecutor_ConfirmedSDKTSAgentSDKRequestPassesThroughWithRealProfil
 	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 3 {
 		t.Fatalf("system block count = %d, want 3: %s", got, seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts; cch=") {
-		t.Fatalf("system.0.text = %q, want sdk-ts billing header with signed cch", got)
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts;" {
+		t.Fatalf("system.0.text = %q, want sdk-ts billing header without CCH", got)
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." {
 		t.Fatalf("system.1.text = %q, want Agent SDK CLI identity preserved", got)
@@ -10331,24 +10331,30 @@ func runClaudeExecutorCapture(t *testing.T, cfg *config.Config, cloakMode string
 	return seenBody, seenHeaders
 }
 
-func TestClaudeExecutor_PreservedThinkingReplayDoesNotInjectDropBlock(t *testing.T) {
+func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock(t *testing.T) {
 	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
 		t.Run(model, func(t *testing.T) {
-			seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
-			if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
-				t.Fatalf("thinking.block_binding must not be injected; body=%s", seenBody)
+			seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
+			if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
+				t.Fatalf("thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
+			}
+			if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
+				t.Fatalf("Anthropic-Beta = %q, want %s", betas, claudeThinkingBindingBeta)
 			}
 			if !strings.Contains(string(seenBody), preservedThinkingTestSignature) {
-				t.Fatalf("replayed thinking signature must survive cleanup: %s", seenBody)
+				t.Fatalf("replayed thinking signature must survive injection: %s", seenBody)
 			}
 		})
 	}
 }
 
-func TestClaudeExecutor_PreservedThinkingReplayDoesNotInjectDropBlockOnStream(t *testing.T) {
-	seenBody, _ := runClaudeExecutorCapture(t, nil, "", true, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
-		t.Fatalf("stream thinking.block_binding must not be injected; body=%s", seenBody)
+func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream(t *testing.T) {
+	seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", true, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
+	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
+		t.Fatalf("stream thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
+	}
+	if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
+		t.Fatalf("stream Anthropic-Beta = %q, want %s", betas, claudeThinkingBindingBeta)
 	}
 }
 
@@ -10457,11 +10463,11 @@ func TestClaudeExecutor_PreservedThinkingForcedToolChoiceKeepsThinkingOff(t *tes
 	}
 }
 
-func TestClaudeExecutor_PreservedThinkingRemovesCallerBinding(t *testing.T) {
+func TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError(t *testing.T) {
 	payload := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"error"}},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
-		t.Fatalf("caller block_binding must be removed; body=%s", seenBody)
+	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
+		t.Fatalf("caller prefix_mismatch_behavior = %q, want error preserved; body=%s", got, seenBody)
 	}
 }
 

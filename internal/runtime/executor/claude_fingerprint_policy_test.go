@@ -1515,8 +1515,8 @@ func TestClaudeExecutor_GlobalDisableClaudeCloakModePreservesConfirmedCallerIden
 		t.Fatalf("Execute() error = %v", errExec)
 	}
 
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != billing {
-		t.Fatalf("system.0.text = %q, want preserved caller billing header %q", got, billing)
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != strings.Replace(billing, " cch=00000;", "", 1) {
+		t.Fatalf("system.0.text = %q, want caller billing header without CCH %q", got, strings.Replace(billing, " cch=00000;", "", 1))
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("system.1.text = %q, want preserved caller CLI identity", got)

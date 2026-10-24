@@ -13,9 +13,9 @@ func TestStripClaudeRequestMarkers(t *testing.T) {
 		want string
 	}{
 		{
-			name: "string billing and binding",
+			name: "string billing and binding preserved",
 			body: `{"system":"x-anthropic-billing-header: cc_version=2.1.302.db3; cc_entrypoint=cli; cch=12345;","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"},"display":"updates"}}`,
-			want: `{"system":"x-anthropic-billing-header: cc_version=2.1.302.db3; cc_entrypoint=cli;","thinking":{"type":"adaptive","display":"updates"}}`,
+			want: `{"system":"x-anthropic-billing-header: cc_version=2.1.302.db3; cc_entrypoint=cli;","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"},"display":"updates"}}`,
 		},
 		{
 			name: "all billing blocks and remaining tags",
@@ -38,9 +38,9 @@ func TestStripClaudeRequestMarkers(t *testing.T) {
 			want: `{"system":"A literal x-anthropic-billing-header: cch=12345;","tools":[{"input_schema":{"properties":{"block_binding":{"type":"object"}}}}],"thinking":{"type":"adaptive"}}`,
 		},
 		{
-			name: "binding removed without system",
+			name: "binding preserved without system",
 			body: `{"thinking":{"type":"enabled","budget_tokens":1024,"block_binding":{"prefix_mismatch_behavior":"error"}}}`,
-			want: `{"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			want: `{"thinking":{"type":"enabled","budget_tokens":1024,"block_binding":{"prefix_mismatch_behavior":"error"}}}`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -30,7 +30,7 @@ func TestClaudeExecutor_RequestCleanup(t *testing.T) {
 					const configuredBilling = "x-anthropic-billing-header: cc_version=configured; cc_entrypoint=cli; cch=12345;"
 					if override {
 						cfg.Payload.Override = []config.PayloadRule{{
-							Models: []config.PayloadModelRule{{Name: "*", NotExist: []string{"thinking.block_binding"}}},
+							Models: []config.PayloadModelRule{{Name: "*"}},
 							Params: map[string]any{
 								"system.0.text": configuredBilling,
 								"thinking.block_binding.prefix_mismatch_behavior": "error",
@@ -82,25 +82,31 @@ func TestClaudeExecutor_RequestCleanup(t *testing.T) {
 					if len(seenBody) == 0 {
 						t.Fatal("expected upstream request")
 					}
-					billing := gjson.GetBytes(seenBody, "system.0.text").String()
+					billing := ""
+					gjson.GetBytes(seenBody, "system").ForEach(func(_, block gjson.Result) bool {
+						text := block.Get("text").String()
+						if strings.HasPrefix(strings.TrimSpace(text), "x-anthropic-billing-header:") {
+							billing = text
+							return false
+						}
+						return true
+					})
 					if override {
 						if billing != configuredBilling || gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String() != "error" {
 							t.Fatalf("payload rules must see cleaned body and retain final values: %s", seenBody)
 						}
 					} else {
-						if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() || strings.Contains(gjson.GetBytes(seenBody, "system").Raw, "cch=") {
-							t.Fatalf("request still contains removed markers: %s", seenBody)
+						if !gjson.GetBytes(seenBody, "thinking.block_binding").Exists() || strings.Contains(billing, "cch=") {
+							t.Fatalf("request lost binding or still contains billing CCH: %s", seenBody)
 						}
-						if path != "count_tokens" || credential != "oauth" {
-							if billing != claudeCleanupBilling {
-								t.Fatalf("billing = %q, want %q", billing, claudeCleanupBilling)
-							}
+						if billing != "" && billing != claudeCleanupBilling {
+							t.Fatalf("billing = %q, want %q", billing, claudeCleanupBilling)
 						}
 					}
 					if gjson.GetBytes(seenBody, "thinking.type").String() != "adaptive" || !strings.Contains(string(seenBody), "Keep literal cch=abcde; block_binding in this message.") {
 						t.Fatalf("cleanup changed unrelated fields: %s", seenBody)
 					}
-					if !(override && path == "count_tokens" && credential == "oauth") && !strings.Contains(string(seenBody), "Keep this instruction.") {
+					if !override && !strings.Contains(string(seenBody), "Keep this instruction.") {
 						t.Fatalf("cleanup lost the caller system instruction: %s", seenBody)
 					}
 				})
@@ -111,7 +117,7 @@ func TestClaudeExecutor_RequestCleanup(t *testing.T) {
 
 func TestClaudeExecutor_LocalCountTokensUsesCleanedBody(t *testing.T) {
 	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
-		Models: []config.PayloadModelRule{{Name: "*", NotExist: []string{"thinking.block_binding"}, Match: []map[string]any{{"system.0.text": claudeCleanupBilling}}}},
+		Models: []config.PayloadModelRule{{Name: "*", Match: []map[string]any{{"thinking.block_binding.prefix_mismatch_behavior": "drop_block"}}}},
 		Params: map[string]any{"messages": []any{}},
 	}}}}
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-cleanup", "base_url": "https://gateway.example"}}

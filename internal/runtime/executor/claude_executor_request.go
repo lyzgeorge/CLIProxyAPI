@@ -337,6 +337,83 @@ func isClaudeFable51OnlyModel(model string) bool {
 	return false
 }
 
+// isClaudePreservedThinkingModel reports the models whose signed thinking
+// blocks Anthropic binds to the creation-time conversation prefix (system,
+// tools, and every earlier message). Replaying those blocks under a reshaped
+// prefix fails binding validation unless the request opts into dropping them.
+// See https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+func isClaudePreservedThinkingModel(model string) bool {
+	return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model) || isClaudeFable51OnlyModel(model)
+}
+
+// claudeThinkingTypeAcceptsBlockBinding reports whether the body's thinking
+// mode may carry block_binding on this model. Haiku 5.5 and Sonnet 5.5 accept
+// it only with adaptive thinking (disabled/between_tools return 400); the
+// other preserved-thinking models also accept manual enabled thinking.
+func claudeThinkingTypeAcceptsBlockBinding(model, thinkingType string) bool {
+	switch strings.ToLower(strings.TrimSpace(thinkingType)) {
+	case "adaptive":
+		return true
+	case "enabled":
+		return !isClaudeHaiku55Model(model) && !isClaudeSonnet55Model(model)
+	default:
+		return false
+	}
+}
+
+// claudeBodyHasSignedThinkingBlock reports whether any assistant message
+// carries a replayed thinking block with a signature or a redacted_thinking
+// block, i.e. history Anthropic subjects to prefix binding validation.
+func claudeBodyHasSignedThinkingBlock(body []byte) bool {
+	found := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, block gjson.Result) bool {
+			switch strings.TrimSpace(block.Get("type").String()) {
+			case "thinking":
+				found = strings.TrimSpace(block.Get("signature").String()) != ""
+			case "redacted_thinking":
+				found = strings.TrimSpace(block.Get("data").String()) != ""
+			}
+			return !found
+		})
+		return !found
+	})
+	return found
+}
+
+// applyClaudePreservedThinkingBinding makes relayed or reshaped histories
+// survivable on preserved-thinking models: when the request replays signed
+// thinking blocks, default thinking.block_binding.prefix_mismatch_behavior to
+// drop_block so a prefix mismatch (client reconnect resending history, a
+// changed tools list, reconstructed server-tool blocks) drops the bound
+// blocks instead of failing the whole request with a 400. On preserved-thinking
+// models, an omitted thinking field runs adaptive thinking and is equivalent to
+// {"type":"adaptive"}, so synthesize that adaptive thinking object unless
+// tool_choice forces tool use. A thinking object without a type and any
+// caller-supplied prefix_mismatch_behavior stay untouched. This must run before
+// user payload rules, which stay the final semantic barrier and may override or
+// filter the injected value.
+func applyClaudePreservedThinkingBinding(body []byte) []byte {
+	model := gjson.GetBytes(body, "model").String()
+	if len(body) == 0 || !isClaudePreservedThinkingModel(model) || claudeToolChoiceForcesToolUse(body) {
+		return body
+	}
+	thinking := gjson.GetBytes(body, "thinking")
+	if thinking.Exists() {
+		if !claudeThinkingTypeAcceptsBlockBinding(model, thinking.Get("type").String()) || thinking.Get("block_binding.prefix_mismatch_behavior").Exists() {
+			return body
+		}
+	}
+	if !claudeBodyHasSignedThinkingBlock(body) {
+		return body
+	}
+	if !thinking.Exists() {
+		body, _ = sjson.SetBytes(body, "thinking.type", "adaptive")
+	}
+	body, _ = sjson.SetBytes(body, "thinking.block_binding.prefix_mismatch_behavior", "drop_block")
+	return body
+}
+
 // claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
 // send thinking.display=updates unless the caller already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
