@@ -19,24 +19,63 @@ import (
 // ClaudeAgentSessionUUID maps the downstream agent conversation to one stable UUID,
 // preserving native Claude Code session signals.
 func ClaudeAgentSessionUUID(headers http.Header, originalPayload, translatedPayload []byte, metadataSets ...map[string]any) string {
-	return claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...)
+	if identity := claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...); identity != "" {
+		return identity
+	}
+	return uuid.NewString()
 }
 
-// ClaudeAgentSessionUUIDForRequest preserves Claude-specific session signals only
-// for a confirmed native caller. Other callers use protocol session fields,
-// execution metadata, or the stable derived conversation root.
+// ClaudeAgentSessionUUIDForRequest adopts an explicit Claude Code session header
+// and ignores metadata.user_id as a caller identity source. Callers that need a
+// credential-scoped fallback cache should use ClaudeAgentSessionUUIDForRequestWithFallback.
 func ClaudeAgentSessionUUIDForRequest(headers http.Header, originalPayload, translatedPayload []byte, confirmedClaudeCode bool, metadataSets ...map[string]any) string {
-	if !confirmedClaudeCode {
-		headers = headers.Clone()
-		for key := range headers {
-			if strings.EqualFold(key, "X-Claude-Code-Session-Id") {
-				delete(headers, key)
+	return ClaudeAgentSessionUUIDForRequestWithFallback(headers, originalPayload, translatedPayload, confirmedClaudeCode, "", metadataSets...)
+}
+
+// ClaudeAgentSessionUUIDForRequestWithFallback is the request identity resolver
+// with an optional credential key used by the one-hour fallback cache.
+func ClaudeAgentSessionUUIDForRequestWithFallback(headers http.Header, originalPayload, translatedPayload []byte, confirmedClaudeCode bool, fallbackKey string, metadataSets ...map[string]any) string {
+	_ = confirmedClaudeCode
+	for key, values := range headers {
+		if !strings.EqualFold(key, "X-Claude-Code-Session-Id") {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return normalizeClaudeSessionIdentity(value)
 			}
 		}
-		originalPayload = withoutClaudeMetadataUserID(originalPayload)
-		translatedPayload = withoutClaudeMetadataUserID(translatedPayload)
 	}
-	return claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...)
+	fallbackKey = strings.TrimSpace(fallbackKey)
+	identityPayload, translatedIdentityPayload := originalPayload, translatedPayload
+	if fallbackKey != "" {
+		// The request body can change on every continuation, so message-hash
+		// affinity is not a conversation identity when using the credential cache.
+		identityPayload, translatedIdentityPayload = nil, nil
+	}
+	identity := claudeAgentSessionUUID(headers, identityPayload, translatedIdentityPayload, metadataSets...)
+	if identity != "" {
+		return identity
+	}
+	if fallbackKey != "" {
+		if cached, errCached := CachedSessionIDRequired(context.Background(), fallbackKey); errCached == nil && cached != "" {
+			return cached
+		}
+		return normalizeClaudeSessionIdentity("cpa-fallback:" + fallbackKey)
+	}
+	return uuid.NewString()
+}
+
+func normalizeClaudeSessionIdentity(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if strings.HasPrefix(identity, "claude:") {
+		identity = strings.TrimPrefix(identity, "claude:")
+	}
+	if parsed, errParse := uuid.Parse(identity); errParse == nil {
+		return parsed.String()
+	}
+	stableInput := "cli-proxy-api\x00claude\x00agent-conversation\x00" + identity
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(stableInput)).String()
 }
 
 type claudeExecutionMetadataKey struct{}
@@ -72,29 +111,9 @@ func claudeAgentSessionUUID(headers http.Header, originalPayload, translatedPayl
 		identity = cliproxyauth.ExtractSessionID(headers, translatedPayload, metadata)
 	}
 	if identity == "" {
-		return uuid.NewString()
+		return ""
 	}
-	if strings.HasPrefix(identity, "claude:") {
-		if parsed, errParse := uuid.Parse(strings.TrimPrefix(identity, "claude:")); errParse == nil {
-			return parsed.String()
-		}
-	}
-	if parsed, errParse := uuid.Parse(identity); errParse == nil {
-		return parsed.String()
-	}
-	stableInput := "cli-proxy-api\x00claude\x00agent-conversation\x00" + identity
-	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(stableInput)).String()
-}
-
-func withoutClaudeMetadataUserID(payload []byte) []byte {
-	if len(payload) == 0 {
-		return payload
-	}
-	updated, errDelete := sjson.DeleteBytes(payload, "metadata.user_id")
-	if errDelete != nil {
-		return payload
-	}
-	return updated
+	return normalizeClaudeSessionIdentity(identity)
 }
 
 func mergeClaudeSessionMetadata(metadataSets ...map[string]any) map[string]any {
@@ -262,8 +281,10 @@ func newClaudeCredentialMetadataRequestError(err error) error {
 	return &claudeCredentialMetadataRequestError{cause: err}
 }
 
-// ApplyClaudeCredentialMetadata rewrites the identity exception shared by native and cloaked OAuth requests.
-func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sessionID string) ([]byte, string, error) {
+// ApplyClaudeCredentialMetadata rebuilds the CPA-owned identity shared by cloaked
+// Claude requests. The optional cacheUserID flag controls device reuse; omitted
+// callers retain the historical stable-device behavior.
+func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sessionID string, cacheUserID ...bool) ([]byte, string, error) {
 	if auth == nil {
 		return nil, "", fmt.Errorf("apply Claude credential metadata: auth is nil")
 	}
@@ -271,27 +292,56 @@ func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sess
 	if errMetadata != nil {
 		return nil, "", newClaudeCredentialMetadataRequestError(fmt.Errorf("apply Claude credential metadata: %w", errMetadata))
 	}
-	var existing string
+	existing := ""
+	// Validate the caller object for duplicate identity members, but never use or
+	// preserve its value. The complete identity container is generated from the
+	// selected CPA credential and session below.
 	if metadataPresent {
 		trimmedMetadata := bytes.TrimSpace(metadata)
 		if len(trimmedMetadata) >= 2 && trimmedMetadata[0] == '{' {
-			userID, userIDPresent, errUserID := uniqueClaudeJSONObjectMember(trimmedMetadata, "user_id")
+			rawUserID, userIDPresent, errUserID := uniqueClaudeJSONObjectMember(trimmedMetadata, "user_id")
 			if errUserID != nil {
 				return nil, "", newClaudeCredentialMetadataRequestError(fmt.Errorf("apply Claude credential metadata: metadata: %w", errUserID))
 			}
-			if userIDPresent && json.Unmarshal(userID, &existing) != nil {
-				existing = ""
+			if userIDPresent {
+				var existingUserID string
+				if errDecode := json.Unmarshal(rawUserID, &existingUserID); errDecode == nil && strings.TrimSpace(existingUserID) != "" {
+					existing = existingUserID
+					// Validate the encoded object for duplicate keys, but discard all
+					// caller-owned fields when rebuilding the CPA identity below.
+					if _, errValidate := rebuildClaudeMetadataUserID(existingUserID, "", "", ""); errValidate != nil {
+						return nil, "", newClaudeCredentialMetadataRequestError(fmt.Errorf("apply Claude credential metadata: metadata.user_id: %w", errValidate))
+					}
+				}
 			}
 		}
 	}
 
-	deviceIDs, _, errDeviceIDs := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
-	if errDeviceIDs != nil {
-		return nil, "", errDeviceIDs
+	cacheDeviceID := true
+	if len(cacheUserID) > 0 {
+		cacheDeviceID = cacheUserID[0]
 	}
-	deviceID, errDeviceID := claudeauth.SelectDeviceID(deviceIDs, sessionID)
-	if errDeviceID != nil {
-		return nil, "", errDeviceID
+	var deviceID string
+	if cacheDeviceID {
+		deviceIDs, _, errDeviceIDs := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
+		if errDeviceIDs != nil {
+			return nil, "", errDeviceIDs
+		}
+		selected, errSelect := claudeauth.SelectDeviceID(deviceIDs, sessionID)
+		if errSelect != nil {
+			return nil, "", errSelect
+		}
+		deviceID = selected
+	} else {
+		deviceIDs, errDeviceIDs := claudeauth.GenerateDeviceIDPool()
+		if errDeviceIDs != nil {
+			return nil, "", errDeviceIDs
+		}
+		selected, errSelect := claudeauth.SelectDeviceID(deviceIDs, sessionID)
+		if errSelect != nil {
+			return nil, "", errSelect
+		}
+		deviceID = selected
 	}
 	accountUUID := ClaudeCredentialAccountUUID(auth)
 	if accountUUID == "" {

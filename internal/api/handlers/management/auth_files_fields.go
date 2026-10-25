@@ -417,6 +417,20 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 			}
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			return &authFileFieldPatchError{message: "weight does not support nested fields"}
+		} else if fieldPath == "requests_per_minute" {
+			if value == nil {
+				delete(targetAuth.Metadata, fieldPath)
+			} else {
+				number, okNumber := value.(json.Number)
+				if !okNumber {
+					return &authFileFieldPatchError{message: "requests_per_minute must be a non-negative integer or null"}
+				}
+				parsed, errInt := number.Int64()
+				if errInt != nil || parsed < 0 || int64(int(parsed)) != parsed {
+					return &authFileFieldPatchError{message: "requests_per_minute must be a non-negative integer or null"}
+				}
+				targetAuth.Metadata[fieldPath] = int(parsed)
+			}
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {

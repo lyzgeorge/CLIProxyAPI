@@ -88,6 +88,13 @@ func claudeDiagnosticsCredentialIdentity(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
+func claudeSessionFallbackKey(auth *cliproxyauth.Auth, apiKey string) string {
+	if key := strings.TrimSpace(apiKey); key != "" {
+		return key
+	}
+	return claudeDiagnosticsCredentialIdentity(auth)
+}
+
 func claudeMessageIDFromResponse(data []byte) string {
 	return strings.TrimSpace(gjson.GetBytes(data, "id").String())
 }

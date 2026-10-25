@@ -727,6 +727,25 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	return 0, false
 }
 
+// RequestsPerMinuteOverride returns the auth-scoped upstream request limit when
+// present. A zero value explicitly disables the limit for this credential.
+func (a *Auth) RequestsPerMinuteOverride() (int, bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	for _, key := range []string{"requests_per_minute", "requests-per-minute"} {
+		if val, ok := a.Metadata[key]; ok {
+			if parsed, okParse := parseIntAny(val); okParse {
+				if parsed < 0 {
+					return 0, true
+				}
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func parseBoolAny(val any) (bool, bool) {
 	switch typed := val.(type) {
 	case bool:

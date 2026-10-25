@@ -31,13 +31,12 @@ var claudeFingerprintProfileWarned sync.Map
 //   - billing metadata gate: claudeCCHSigningEnabled (CCH itself is omitted)
 //   - identity: EnsureClaudeCLIFingerprintIdentity + ApplyClaudeCredentialMetadata
 //
-// Goal: Anthropic Messages API keys, custom gateways, and delegated providers
-// (such as Kimi) can opt into the Claude Code OAuth CLI request fingerprint via
-// fingerprint-profile=claude-code-cli, without OAuth control-plane semantics.
-// Real Claude OAuth tokens always keep the strict CLI fingerprint. First-party
-// api.anthropic.com API keys stay caller-owned by default and only take the CLI
-// Messages fingerprint when this field is set. MCP aliases and diagnostics are
-// wire fingerprint behavior; refresh, profile and cancellation stay gated on
+// Goal: keep the Claude wire fingerprint independent from authentication. The
+// unified cloak applies it to API keys, custom gateways, and delegated providers
+// without granting them OAuth control-plane semantics.
+// Real Claude OAuth tokens always keep the strict CLI fingerprint. The unified
+// cloak applies the emitted CLI Messages fingerprint to API keys and delegated
+// providers as well, while refresh, profile and cancellation remain gated on
 // AuthIsOAuthToken.
 type claudeFingerprintPolicy struct {
 	AuthIsOAuthToken     bool
@@ -130,7 +129,7 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 // API keys seed the synthesized identity from the key itself; delegated
 // providers such as Kimi seed from the stable auth identity, so an access-token
 // rotation does not rotate the device fingerprint.
-func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize bool) ([]byte, error) {
+func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize, cacheUserID bool) ([]byte, error) {
 	identitySeed := apiKey
 	if isKimiMessagesUpstream(auth, upstreamURL) {
 		identitySeed = helps.ClaudeCLIAuthIdentitySeed(auth)
@@ -139,7 +138,7 @@ func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstre
 	if errIdentity != nil {
 		return nil, fmt.Errorf("ensure Claude CLI fingerprint identity: %w", errIdentity)
 	}
-	updated, _, errApply := helps.ApplyClaudeCredentialMetadata(body, identityAuth, sessionID)
+	updated, _, errApply := helps.ApplyClaudeCredentialMetadata(body, identityAuth, sessionID, cacheUserID)
 	if errApply != nil {
 		return nil, fmt.Errorf("apply Claude credential metadata: %w", errApply)
 	}

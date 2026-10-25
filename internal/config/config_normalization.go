@@ -351,12 +351,16 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return out
 }
 
-// NormalizeCloakConfig trims strings and removes blank sensitive words.
+// NormalizeCloakConfig trims strings, removes blank sensitive words, and
+// normalizes disabled numeric limits.
 func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
 	if cloak == nil {
 		return nil
 	}
 	cloak.Mode = strings.TrimSpace(cloak.Mode)
+	if cloak.RequestsPerMinute < 0 {
+		cloak.RequestsPerMinute = 0
+	}
 	if len(cloak.SensitiveWords) > 0 {
 		normalizedWords := make([]string, 0, len(cloak.SensitiveWords))
 		for _, w := range cloak.SensitiveWords {

@@ -36,6 +36,48 @@ func TestSyncAuthFilePriorityAttributeTracksFileSource(t *testing.T) {
 	}
 }
 
+func TestPatchAuthFileFields_RequestsPerMinute(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	record := &coreauth.Auth{
+		ID:         "claude-rpm.json",
+		FileName:   "claude-rpm.json",
+		Provider:   "claude",
+		Attributes: map[string]string{"path": "/tmp/claude-rpm.json"},
+		Metadata:   map[string]any{"type": "claude"},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"claude-rpm.json","requests-per-minute":12}`))
+	h.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated, ok := manager.GetByID(record.ID)
+	if !ok || updated == nil {
+		t.Fatal("updated credential not found")
+	}
+	if got, okLimit := updated.RequestsPerMinuteOverride(); !okLimit || got != 12 {
+		t.Fatalf("requests_per_minute = (%d, %t), want (12, true)", got, okLimit)
+	}
+
+	rec = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"claude-rpm.json","requests_per_minute":null}`))
+	h.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	updated, _ = manager.GetByID(record.ID)
+	if _, okLimit := updated.RequestsPerMinuteOverride(); okLimit {
+		t.Fatal("cleared requests_per_minute still present")
+	}
+}
+
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

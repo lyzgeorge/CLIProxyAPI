@@ -472,6 +472,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
 			}
+			if requestsPerMinute, okLimit := authFileRequestsPerMinuteFromJSON(data); okLimit {
+				fileData["requests_per_minute"] = requestsPerMinute
+			}
 		}
 
 		files = append(files, fileData)
@@ -784,6 +787,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	if requestsPerMinute, ok := auth.RequestsPerMinuteOverride(); ok {
+		entry["requests_per_minute"] = requestsPerMinute
+	}
 	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		entry["siwc_bind_supported"] = siwcBindEligible(auth)
 		entry["use_siwc"] = coreauth.IsCodexUseSIWC(auth)
@@ -806,6 +812,14 @@ func authFileRequestRetryFromJSON(data []byte) (int, bool) {
 		return 0, false
 	}
 	return (&coreauth.Auth{Metadata: metadata}).RequestRetryOverride()
+}
+
+func authFileRequestsPerMinuteFromJSON(data []byte) (int, bool) {
+	var metadata map[string]any
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return 0, false
+	}
+	return (&coreauth.Auth{Metadata: metadata}).RequestsPerMinuteOverride()
 }
 
 // quotaObservationPayload exposes only passive provider observations. Cooldown

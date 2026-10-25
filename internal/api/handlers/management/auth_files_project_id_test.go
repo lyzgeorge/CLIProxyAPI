@@ -52,6 +52,35 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_IncludesRequestsPerMinuteFromManager(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	authDir := t.TempDir()
+	fileName := "claude-rpm.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"claude","requests_per_minute":9}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "claude", "requests_per_minute": 9},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	entry := firstAuthFileEntry(t, h)
+	if got, ok := entry["requests_per_minute"].(float64); !ok || got != 9 {
+		t.Fatalf("requests_per_minute = %#v, want JSON number 9", entry["requests_per_minute"])
+	}
+}
+
 func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

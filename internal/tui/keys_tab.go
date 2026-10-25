@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -401,6 +402,23 @@ func renderProviderKeys(sb *strings.Builder, title string, keys []map[string]any
 		}
 		if baseURL != "" {
 			info += " → " + baseURL
+		}
+		if title == "Claude API Keys" {
+			if cloak, ok := key["cloak"].(map[string]any); ok {
+				var requestsPerMinute int
+				switch value := cloak["requests-per-minute"].(type) {
+				case float64:
+					requestsPerMinute = int(value)
+				case int:
+					requestsPerMinute = value
+				case json.Number:
+					parsed, _ := value.Int64()
+					requestsPerMinute = int(parsed)
+				}
+				if requestsPerMinute > 0 {
+					info += fmt.Sprintf(" (limit: %d/min)", requestsPerMinute)
+				}
+			}
 		}
 		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, info))
 	}

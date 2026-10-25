@@ -82,8 +82,8 @@ const (
 )
 
 // These are the exact beta sequences observed on markerless native Haiku
-// helper requests. The first six are Claude Code 2.1.220. The last is the
-// 2.1.280 title helper captured 2026-09-23: structured output, then
+// helper requests. The first six are the baseline helper shape. The last is
+// the current title helper shape: structured output, then
 // server-side fallback, fallback credit, and cache diagnosis. Keeping the
 // allowlist exact avoids turning the helper exception into a generic
 // no-claude-code-beta bypass.
@@ -438,8 +438,7 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	if !meetsClaudeDeviceProfileBaseline(candidate, profile) {
 		return false
 	}
-	// Claude Code 2.1.258 (@anthropic-ai/sdk 0.112.1), measured 2026-09-02 on the
-	// quota probe and the session-title helper: X-Stainless-Async is never sent
+	// The current Claude Code baseline sends no X-Stainless-Async header
 	// and both shapes offer the full compression set. x-client-request-id is
 	// attached only when the client's base URL is api.anthropic.com, so a client
 	// pointed at CPA through ANTHROPIC_BASE_URL sends none while one that reaches

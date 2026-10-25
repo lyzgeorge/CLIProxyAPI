@@ -730,13 +730,15 @@ upstream:
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #           rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #           native-tool-search: false # optional: default is false; when true, trust this key's custom base-url with Anthropic native tool search (defer_loading + tool_reference) for Codex tool_search; requires upstream.claude.tool-search: true
-#           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
-#             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
-#                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
+#           cloak:                         # optional: configure the unified Claude Code wire cloak
+#             mode: "auto"                 # "auto" (default inside this block): use the unified Claude Code wire cloak
+#                                          # "always": force the unified cloak
 #                                          # "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity/billing attribution
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
 #             # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
 #             # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id".
+#             # requests_per_minute can be saved per login credential from the auth-files UI
+#             # (0 disables the credential limiter).
 #             # upstream.claude.disable-claude-cloak-mode is the shared default; this key can override it.
 #             strict-mode: false           # false (default): legacy-model whitelist uses a user system-reminder;
 #                                          # all other and future models use messages[].role=system
@@ -744,25 +746,23 @@ upstream:
 #             sensitive-words:             # optional: words to obfuscate with zero-width characters
 #               - "API"
 #               - "proxy"
-#             cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
-#             # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
+#             cache-user-id: true          # optional: default is false; set true to reuse the CPA device identity for this key/profile
+#             requests-per-minute: 60       # optional fixed-window per-key limit; <= 0 disables it
+#             # Every custom tool on a cloaked request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
 #
 #           # fingerprint-profile (optional, top-level on this api-keys.claude key entry; not a cloak sub-field):
-#           # OAuth and API-key fingerprints are different contracts.
-#           #   - Real Claude OAuth stays on the strict Claude Code CLI wire fingerprint.
-#           #   - API keys (official Anthropic, custom gateways, Kimi) stay loose and
-#           #     caller-owned unless this field is set.
+#           # OAuth and API-key authentication remain separate, but the Claude wire
+#           # cloak is unified: every request uses the measured CLI body/header baseline
+#           # unless mode: never/uncloak is explicitly selected.
 #           #
-#           # Default (omit / empty): keep the caller request fingerprint and headers.
-#           # Official api.anthropic.com API keys do not add extra CLI betas/identity unless
-#           # this field is set. Custom gateways and delegated providers are the same.
+#           # Default (omit / empty): use the unified cloak and CPA-owned identity.
 #           #
-#           # Controls request fingerprint only on /v1/messages (and related Claude executor paths).
+#           # Controls additional credential-scoped CLI behavior on /v1/messages (and related paths).
 #           # Auth scheme stays API key (x-api-key on api.anthropic.com; Bearer on custom base-url).
 #           # Does NOT enable OAuth refresh, profile fetch, or OAuth-cancellation semantics.
 #           #
 #           # Values:
-#           #   omit / empty        = caller-owned API-key fingerprint (respects caller)
+#           #   omit / empty        = unified Claude Code CLI fingerprint
 #           #   "claude-code-cli"   = same Messages fingerprint as Claude Code OAuth CLI,
 #           #                         including official Anthropic API keys: OAuth Anthropic-Beta
 #           #                         set, CCH signing on api.anthropic.com, stable CLI

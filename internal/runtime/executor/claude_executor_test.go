@@ -4750,6 +4750,44 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.", "")
 }
 
+func TestCheckSystemInstructionsWithMode_PreservesNativePrefixAndCallerBlocks(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-5","system":[` +
+		`{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=cli; cch=abcde;"},` +
+		`{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},` +
+		`{"type":"text","text":"caller system prompt"}],` +
+		`"messages":[{"role":"user","content":"hello"}]}`)
+	out := checkSystemInstructionsWithSigningMode(payload, false, true, "2.1.280", "cli", "")
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+		t.Fatalf("system block count = %d, want 3: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=cli; cch=abcde;" {
+		t.Fatalf("billing block changed: %q", got)
+	}
+	if got := gjson.GetBytes(out, "system.2.text").String(); got != "caller system prompt" {
+		t.Fatalf("caller block changed or moved: %q; body=%s", got, out)
+	}
+}
+
+func TestEnsureClaudeCodeOutputDefaults(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-5","thinking":{"type":"adaptive"}}`)
+	body = ensureClaudeCodeOutputDefaults(body)
+	if got := gjson.GetBytes(body, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+	if got := gjson.GetBytes(body, "output_config.effort").String(); got != "medium" {
+		t.Fatalf("output_config.effort = %q, want medium", got)
+	}
+
+	caller := []byte(`{"model":"claude-sonnet-5","temperature":0.7,"output_config":{"effort":"high"}}`)
+	caller = ensureClaudeCodeOutputDefaults(caller)
+	if got := gjson.GetBytes(caller, "temperature").Float(); got != 0.7 {
+		t.Fatalf("caller temperature = %v, want 0.7", got)
+	}
+	if got := gjson.GetBytes(caller, "output_config.effort").String(); got != "high" {
+		t.Fatalf("caller effort = %q, want high", got)
+	}
+}
+
 func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessages(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":[` +
 		`{"type":"text","text":"first guidance","cache_control":{"type":"ephemeral","ttl":"1h"}},` +

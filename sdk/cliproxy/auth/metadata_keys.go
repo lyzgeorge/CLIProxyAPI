@@ -24,6 +24,8 @@ func CanonicalCredentialMetadataKey(key string) string {
 		return "proxy_url"
 	case "request-retry":
 		return "request_retry"
+	case "requests-per-minute":
+		return "requests_per_minute"
 	case "request-scoped-errors":
 		return "request_scoped_errors"
 	case "tool-prefix-disabled":

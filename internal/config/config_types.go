@@ -570,13 +570,13 @@ type PayloadModelRule struct {
 	NotExist []string `yaml:"not-exist" json:"not-exist"`
 }
 
-// CloakConfig configures request cloaking for non-Claude-Code clients.
+// CloakConfig configures the Claude Code wire cloak.
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
 	// Mode controls cloaking behavior: "auto" (default), "always", "never", or "uncloak".
-	// Supplying this CloakConfig explicitly enables cloaking for an unprofiled API key.
-	// - "auto": cloak unless strong request signals identify a verified native entrypoint
-	// - "always": cloak every unconfirmed client; confirmed native Claude Code remains passthrough
+	// Supplying this CloakConfig configures the unified Claude Code wire cloak.
+	// - "auto": use the unified Claude Code wire cloak for every request
+	// - "always": force the unified cloak
 	// - "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity and billing attribution
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
@@ -589,9 +589,13 @@ type CloakConfig struct {
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
-	// CacheUserID controls whether Claude user_id values are cached per API key.
-	// When false, a fresh random user_id is generated for every request.
+	// CacheUserID controls whether the CPA Claude device identity is cached per key/profile.
+	// When false, a fresh random device identity is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// RequestsPerMinute limits Claude upstream attempts for this credential/profile.
+	// Zero or a negative value disables the limiter.
+	RequestsPerMinute int `yaml:"requests-per-minute,omitempty" json:"requests-per-minute,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

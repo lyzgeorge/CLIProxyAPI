@@ -105,25 +105,18 @@ func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCac
 		return helps.GenerateFakeUserIDWithSessionID(sessionID), nil
 	}
 
-	metadata := gjson.GetBytes(payload, "metadata")
-	if !metadata.Exists() {
-		userID, errUserID := generateID()
-		if errUserID != nil {
-			return nil, errUserID
-		}
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", userID)
-		return payload, nil
+	// Caller-supplied metadata.user_id is never a valid CPA identity source. Set
+	// the complete value unconditionally so a copied Claude Code identity cannot
+	// leak upstream, including when it happens to pass the native format check.
+	userID, errUserID := generateID()
+	if errUserID != nil {
+		return nil, errUserID
 	}
-
-	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
-		userID, errUserID := generateID()
-		if errUserID != nil {
-			return nil, errUserID
-		}
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", userID)
+	updated, errSet := sjson.SetBytes(payload, "metadata.user_id", userID)
+	if errSet != nil {
+		return nil, errSet
 	}
-	return payload, nil
+	return updated, nil
 }
 
 // fingerprintSalt is the salt used by Claude Code to compute the 3-char build fingerprint.
@@ -202,7 +195,8 @@ func resolveClaudeContinuityTags(
 	hasExecutionMetadata := helps.ClaudeExecutionMetadataFromContext(ctx)
 	sessionID := helps.ClaudeSessionIDFromContext(ctx)
 	if sessionID == "" && auth != nil {
-		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+		fallbackKey := claudeDiagnosticsCredentialIdentity(auth)
+		sessionID = helps.ClaudeAgentSessionUUIDForRequestWithFallback(incomingHeaders, payload, payload, confirmedClaudeCode, fallbackKey)
 	}
 	if sessionID == "" || auth == nil {
 		return "", "", helps.ClaudeContinuityContext{}, false
@@ -410,6 +404,9 @@ func checkSystemInstructionsWithSigningModeAt(
 	turnOrigin ...string,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
+	if hasNativeClaudeCodeSystemPrefix(system) {
+		return injectClaudeCodeCurrentDateInternal(payload, currentDate, isExplicitPromptCacheMode(payload))
+	}
 	messageText := claudeBillingFingerprintMessageText(payload)
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
@@ -1599,6 +1596,25 @@ func isClaudeCodeIdentitySystemText(text string) bool {
 		trimmed == "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 }
 
+// hasNativeClaudeCodeSystemPrefix recognizes the two stable top-level blocks
+// emitted by Claude Code (billing header followed by the 57-byte CLI identity).
+// Once this prefix is present, the remaining caller blocks already belong to
+// the native conversation and must stay in the same top-level system array.
+func hasNativeClaudeCodeSystemPrefix(system gjson.Result) bool {
+	if !system.IsArray() || len(system.Array()) < 2 {
+		return false
+	}
+	first, second := system.Get("0"), system.Get("1")
+	if first.Get("type").String() != "text" || second.Get("type").String() != "text" {
+		return false
+	}
+	billing := strings.TrimSpace(first.Get("text").String())
+	return strings.HasPrefix(billing, "x-anthropic-billing-header:") &&
+		strings.Contains(billing, "cc_version=") &&
+		strings.Contains(billing, "cc_entrypoint=cli;") &&
+		second.Get("text").String() == claudeCodeCLIIdentity
+}
+
 func isEffectiveConfirmedClaudeCode(detection helps.ClaudeCodeRequestDetection, policy claudeWirePolicy) bool {
 	if policy.Uncloak {
 		return false
@@ -1713,7 +1729,6 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	}
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
-	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
 	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
 	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
 	explicitNever := trimmedMode == "never" && !uncloak
@@ -1721,15 +1736,11 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
-		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode && !uncloak,
-		Uncloak:              uncloak,
-		ExplicitNever:        explicitNever,
-	}
-	if confirmedClaudeCode {
-		// Native Claude Code is always a passthrough client unless the
-		// credential explicitly opts out of Claude Code identity via never/uncloak.
-		policy.Cloak = false
-		return policy, settings
+		// Cloaking is the common Claude wire policy. Native-client detection only
+		// affects transport details; it must not create a body-shape bypass.
+		Cloak:         !uncloak && trimmedMode != "never",
+		Uncloak:       uncloak,
+		ExplicitNever: explicitNever,
 	}
 	switch trimmedMode {
 	case "always":
@@ -1737,9 +1748,8 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	case "never", "uncloak":
 		policy.Cloak = false
 	default:
-		// Auto applies the CLI cloak only to real Claude OAuth credentials,
-		// explicit fingerprint-profile opt-ins, or credentials with explicit cloak
-		// settings. Other API keys and delegated providers keep the caller shape.
+		// Auto uses the unified cloak for every Claude request unless the operator
+		// explicitly selected a no-cloak mode above.
 	}
 	return policy, settings
 }
@@ -1865,9 +1875,9 @@ func applyCloakingInternal(
 		payload = stripClaudeCacheControlTTL(payload)
 	}
 
-	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
-	// is applied later through the shared ApplyClaudeCredentialMetadata path.
-	// Other non-OAuth cloaking keeps the legacy per-request fake user_id.
+	// The final request path applies the shared CPA credential identity after all
+	// cloaking transforms. Keep a temporary fake identity here for callers that
+	// use this helper directly; it is always overwritten before upstream dispatch.
 	if !policy.ProfileClaudeCodeCLI {
 		var errFakeUserID error
 		payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, settings.cacheUserID)
@@ -2129,7 +2139,7 @@ func shouldEnsureCacheControl(payload []byte, cloaked, confirmedClaudeCode bool,
 	if isExplicitPromptCacheMode(append([][]byte{payload}, candidates...)...) {
 		return false
 	}
-	return !confirmedClaudeCode && (cloaked || countCacheControls(payload) == 0)
+	return cloaked || (!confirmedClaudeCode && countCacheControls(payload) == 0)
 }
 
 func countCacheControls(payload []byte) int {

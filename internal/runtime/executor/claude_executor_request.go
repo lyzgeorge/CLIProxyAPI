@@ -132,13 +132,13 @@ func isManagedClaudeBeta(beta string) bool {
 	return claudeManagedBetaSet[strings.TrimSpace(beta)]
 }
 
-// claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
-// 2.1.280 does: the list is per-request, not a fixed string. requested holds the
+// claudeCodeCLIBetas assembles the current Claude Code Anthropic-Beta baseline:
+// the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for, which decide the capability flags below.
 //
 // Verified against api.anthropic.com with native 2.1.258 captures on interactive,
 // non-interactive, subagent, and multi-model paths (Sonnet, Opus, Fable, Haiku).
-// Claude Code 2.1.280 (measured 2026-09-23, binary 80abbfe) inserts
+// The current Claude Code CLI inserts
 // mid-conversation-tool-changes immediately after mid-conversation-system on the
 // same non-legacy models. The betas named in issue #6054 are feature-gated in
 // that binary, so they are emitted only for the model capability or body shape
@@ -167,7 +167,7 @@ func isManagedClaudeBeta(beta string) bool {
 //	21 structured-outputs-2025-12-15      structured output requests
 //	22 thinking-binding-controls-2026-08-01  thinking.block_binding, or requested
 //	23 thinking-display-updates-2026-08-18 requests with thinking.display=updates
-//	24 thinking-resumption-2026-07-17     requested only; the 2.1.280 flag defaults off
+//	24 thinking-resumption-2026-07-17     requested only; the current flag defaults off
 //	25 fast-mode-2026-02-01               speed:fast requests only
 //	26 afk-mode-2026-01-31                auto-mode sessions, forwarded when the caller sends it
 //	27 extended-cache-ttl-2025-04-11      OAuth credentials (omitted on subagent & probe)
@@ -295,7 +295,7 @@ func claudeCanonicalModel(model string) string {
 	return model
 }
 
-// claudeModelHasPerTurnEffort reports models whose 2.1.280 catalog capability
+// claudeModelHasPerTurnEffort reports models whose current catalog capability
 // per_turn_effort puts per-turn-control-2026-07-01 on every first-party request.
 func isClaudeOpus55Model(model string) bool {
 	model = claudeCanonicalModel(model)
@@ -414,7 +414,7 @@ func applyClaudePreservedThinkingBinding(body []byte) []byte {
 	return body
 }
 
-// claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
+// claudeModelUsesProgressDisplay reports the interactive CLI models that
 // send thinking.display=updates unless the caller already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
 	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
@@ -972,6 +972,23 @@ func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
 	return body
 }
 
+// ensureClaudeCodeOutputDefaults fills the two sampling fields that Claude
+// Code sends on ordinary cloaked turns. Caller-provided values remain intact;
+// helpers, probes, unsupported models, and forced tool turns keep their
+// measured shapes.
+func ensureClaudeCodeOutputDefaults(body []byte) []byte {
+	if len(body) == 0 || helps.IsClaudeProbeOrHelperRequest(body) || claudeToolChoiceForcesToolUse(body) {
+		return body
+	}
+	if !gjson.GetBytes(body, "temperature").Exists() {
+		body, _ = sjson.SetBytes(body, "temperature", float64(1))
+	}
+	if claudeRequestSupportsEffort(body, nil) && !gjson.GetBytes(body, "output_config.effort").Exists() {
+		body, _ = sjson.SetBytes(body, "output_config.effort", "medium")
+	}
+	return body
+}
+
 type compositeReadCloser struct {
 	io.Reader
 	closers []func() error
@@ -1230,8 +1247,8 @@ func applyClaudeHeadersWithNativeProfile(
 	}
 
 	// Authentication and wire fingerprint are separate authorities. File-backed
-	// delegated providers still use Bearer auth, but only real Claude OAuth and
-	// explicit fingerprint-profile opt-ins receive the CLI wire profile.
+	// delegated providers still use Bearer auth, while the unified cloak emits
+	// the CLI wire profile independently of the authentication scheme.
 	credentialUsesBearer := claudeCredentialUsesOAuth(auth, apiKey)
 	useAPIKey := !credentialUsesBearer
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
@@ -1264,9 +1281,6 @@ func applyClaudeHeadersWithNativeProfile(
 			incomingHeaders = ginCtx.Request.Header
 		}
 	}
-	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
-	var deviceProfile helps.ClaudeDeviceProfile
-
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
 	if !confirmedClaudeCode && !wirePolicy.Cloak && wirePolicy.ExplicitNever && !wirePolicy.Uncloak {
@@ -1289,16 +1303,13 @@ func applyClaudeHeadersWithNativeProfile(
 			}
 		}
 	}
-	if confirmedClaudeCode && incomingBetas != "" {
+	if wirePolicy.ExplicitNever && confirmedClaudeCode && incomingBetas != "" {
+		// Explicit never mode remains a true native passthrough. The unified
+		// cloak path below intentionally rebuilds the beta set instead.
 		baseBetas = incomingBetas
 		if advisorNeeded {
 			baseBetas = withClaudeAdvisorToolBeta(baseBetas)
 		}
-		// Measured Haiku helper requests already carry their own cache-ttl beta
-		// choice (omitting extended-cache-ttl on 2.1.220/2.1.280 probes/title
-		// helpers), while helpers arriving via ANTHROPIC_BASE_URL still need
-		// oauth-2025-04-20 when CPA authenticates upstream with OAuth.
-		// Native Claude Code subagents and probes also omit extended-cache-ttl.
 		if useOAuthBetas {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
@@ -1393,7 +1404,7 @@ func applyClaudeHeadersWithNativeProfile(
 				baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
 			}
 		}
-		// Enforce strict native Claude Code 2.1.280 model & turn beta gating:
+		// Enforce strict Claude Code model and turn beta gating:
 		if !claudeRequestSupportsEffort(body, nil) {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 		}
@@ -1419,7 +1430,7 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		// A body carrying thinking.block_binding is rejected upstream unless
 		// the binding-controls beta travels with it, in every fingerprint
-		// mode (cloaked, caller-owned, and confirmed passthrough alike).
+		// mode (cloaked, caller-owned, and explicit legacy passthrough alike).
 		if gjson.GetBytes(body, "thinking.block_binding").Exists() {
 			baseBetas = withClaudeBetaAppended(baseBetas, claudeThinkingBindingBeta)
 		}
@@ -1432,6 +1443,9 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		for _, beta := range hd.AnthropicBetaAppend {
 			emittedBetas = withClaudeBetaAppended(emittedBetas, beta)
+		}
+		if !wirePolicy.Uncloak && (applyCLIFingerprint || confirmedClaudeCode) {
+			emittedBetas = withClaudeBetaAppended(emittedBetas, claudeCodeBeta)
 		}
 
 		if strings.TrimSpace(emittedBetas) == "" {
@@ -1507,13 +1521,7 @@ func applyClaudeHeadersWithNativeProfile(
 		return nil
 	}
 
-	identityHeader := func(name, fallback string) {
-		if confirmedClaudeCode {
-			misc.EnsureHeader(r.Header, incomingHeaders, name, fallback)
-			return
-		}
-		r.Header.Set(name, fallback)
-	}
+	identityHeader := func(name, fallback string) { r.Header.Set(name, fallback) }
 	identityHeader("Anthropic-Version", "2023-06-01")
 	identityHeader("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	identityHeader("X-App", "cli")
@@ -1523,21 +1531,14 @@ func applyClaudeHeadersWithNativeProfile(
 	identityHeader("X-Stainless-Lang", "js")
 	// Native async SDK helpers add this header independently of body.stream.
 	// Preserve it only after the complete native-client detector succeeds.
-	if confirmedClaudeCode && helps.HeaderValueCaseInsensitive(incomingHeaders, "X-Stainless-Async") == "async" {
-		r.Header.Set("X-Stainless-Async", "async")
-	}
+	r.Header.Del("X-Stainless-Async")
 	// Claude Code omits X-Stainless-Timeout on count_tokens; only a confirmed
 	// native client that sent one of its own keeps it there.
 	if !countTokens {
 		identityHeader("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	} else if confirmedClaudeCode {
-		if incomingTimeout := helps.HeaderValueCaseInsensitive(incomingHeaders, "X-Stainless-Timeout"); incomingTimeout != "" {
-			r.Header.Set("X-Stainless-Timeout", incomingTimeout)
-		}
 	}
-	// Selected-credential OAuth identity is an explicit native passthrough
-	// exception. Callers pass the same agent-conversation UUID written to
-	// metadata.user_id; legacy paths retain their previous cached fallback.
+	// Selected-credential OAuth identity is reconstructed from CPA-owned
+	// continuity state. Caller session headers are never adopted by the cloak.
 	sessionID := ""
 	for _, candidate := range sessionIDs {
 		if candidate = strings.TrimSpace(candidate); candidate != "" {
@@ -1555,22 +1556,25 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
 	}
-	// Preserve native Claude Code subagent and environment headers when present in the incoming request.
-	for _, hdr := range []string{
-		"X-Claude-Code-Agent-Id",
-		"X-Claude-Code-Parent-Agent-Id",
-		"X-Claude-Remote-Container-Id",
-		"X-Claude-Remote-Session-Id",
-		"X-Client-App",
-		"X-Anthropic-Additional-Protection",
-	} {
-		if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
-			r.Header.Set(hdr, val)
+	// Explicit never mode retains the legacy native transport escape hatch. The
+	// unified cloak must not forward caller-owned software identity headers.
+	if wirePolicy.ExplicitNever && confirmedClaudeCode {
+		for _, hdr := range []string{
+			"X-Claude-Code-Agent-Id",
+			"X-Claude-Code-Parent-Agent-Id",
+			"X-Claude-Remote-Container-Id",
+			"X-Claude-Remote-Session-Id",
+			"X-Client-App",
+			"X-Anthropic-Additional-Protection",
+		} {
+			if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
+				r.Header.Set(hdr, val)
+			}
 		}
 	}
 	// Gateway hints are caller-owned software state. Preserve them only for a
 	// confirmed native client; an unconfirmed caller must not spoof its class.
-	if confirmedClaudeCode {
+	if wirePolicy.ExplicitNever && confirmedClaudeCode {
 		for _, hdr := range []string{
 			"X-Claude-Code-Request-Class",
 			"X-Claude-Code-Agent-Type",
@@ -1594,7 +1598,7 @@ func applyClaudeHeadersWithNativeProfile(
 	// value and never synthesizes one; off never sends the header.
 	incomingClientRequestID := helps.HeaderValueCaseInsensitive(incomingHeaders, "x-client-request-id")
 	if hd.ClientRequestID != config.ClaudeClientRequestIDOff && (isAnthropicBase || (helperProfile && incomingClientRequestID != "")) {
-		if hd.ClientRequestID != config.ClaudeClientRequestIDPassthrough {
+		if confirmedClaudeCode || hd.ClientRequestID != config.ClaudeClientRequestIDPassthrough {
 			identityHeader("x-client-request-id", uuid.New().String())
 		} else if incomingClientRequestID != "" {
 			r.Header.Set("x-client-request-id", incomingClientRequestID)
@@ -1606,17 +1610,17 @@ func applyClaudeHeadersWithNativeProfile(
 	// full compression set as the main thread (2.1.220's minimal probe offered gzip
 	// only). Confirmed helpers preserve the incoming native values.
 	applyTransportNegotiation := func() {
-		if helperProfile {
-			identityHeader("Accept", "application/json")
-			identityHeader("Accept-Encoding", "gzip, deflate, br, zstd")
-			return
-		}
-		if stream && !isAnthropicBase {
-			// Other Anthropic-compatible upstreams (Kimi, custom gateways) may select
-			// SSE from Accept and need not compress predictably, so they keep the
-			// conservative contract.
-			r.Header.Set("Accept", "text/event-stream")
-			r.Header.Set("Accept-Encoding", "identity")
+		if confirmedClaudeCode {
+			if incomingAccept := helps.HeaderValueCaseInsensitive(incomingHeaders, "Accept"); incomingAccept != "" {
+				r.Header.Set("Accept", incomingAccept)
+			} else {
+				r.Header.Set("Accept", "application/json")
+			}
+			if incomingEncoding := helps.HeaderValueCaseInsensitive(incomingHeaders, "Accept-Encoding"); incomingEncoding != "" {
+				r.Header.Set("Accept-Encoding", incomingEncoding)
+			} else {
+				r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+			}
 			return
 		}
 		r.Header.Set("Accept", "application/json")
@@ -1628,19 +1632,13 @@ func applyClaudeHeadersWithNativeProfile(
 	// allowed to populate or reuse another client's software profile.
 	if wirePolicy.ExplicitNever && confirmedClaudeCode {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, true, true)
-	} else if stabilizeDeviceProfile {
-		if confirmedClaudeCode {
-			var errDeviceProfile error
-			deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, incomingHeaders, cfg)
-			if errDeviceProfile != nil {
-				return errDeviceProfile
-			}
-			helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
-		} else {
-			helps.ApplyClaudeDefaultDeviceProfileHeaders(r, cfg)
-		}
+	} else if wirePolicy.Cloak || confirmedClaudeCode {
+		// Cloaked requests use the measured Claude Code baseline. A confirmed
+		// caller contributes only the transport negotiation above; its software
+		// profile must not leak through the unified body cloak.
+		helps.ApplyClaudeDefaultDeviceProfileHeaders(r, cfg)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, confirmedClaudeCode)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, false)
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -1670,6 +1668,9 @@ func applyClaudeHeadersWithNativeProfile(
 // exactly how the streaming and non-streaming beta sets diverged before.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	applyClaudeWireHeaderCasing(req)
+	if errLimit := checkClaudeProfileRateLimit(req.Context()); errLimit != nil {
+		return nil, errLimit
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	return client.Do(req)
 }

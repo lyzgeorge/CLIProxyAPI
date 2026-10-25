@@ -199,6 +199,7 @@ func TestApplyClaudeHeaders_WireCasingPreservesValues(t *testing.T) {
 // checked structurally.
 func TestClaudeExecutorHasSingleUpstreamSendBoundary(t *testing.T) {
 	paths := []string{
+		"claude_executor.go",
 		"claude_executor_execute.go",
 		"claude_executor_stream.go",
 		"claude_executor_tokens.go",
