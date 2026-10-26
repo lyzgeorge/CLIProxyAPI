@@ -175,7 +175,7 @@ func TestCodexDuplexSteerPayloadBarrier(t *testing.T) {
 	}
 }
 
-func TestClaudePayloadConditionsObserveBuiltinThinkingRemoval(t *testing.T) {
+func TestClaudePayloadConditionsObserveDisabledForcedToolThinking(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		present := []config.PayloadModelRule{{Name: "*", Exist: []string{"thinking"}}}
 		absent := []config.PayloadModelRule{{Name: "*", NotExist: []string{"thinking"}}}
@@ -188,16 +188,16 @@ func TestClaudePayloadConditionsObserveBuiltinThinkingRemoval(t *testing.T) {
 		}}
 		payload := []byte(`{"model":"claude-opus-5","max_tokens":100,"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"},"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
 		body := executeClaudeContextManagementRequest(t, cfg, payload, stream)
-		if gjson.GetBytes(body, "thinking").Exists() {
-			t.Fatalf("builtin did not remove forced-tool thinking: %s", body)
+		if got := gjson.GetBytes(body, "thinking.type").String(); got != "disabled" {
+			t.Fatalf("builtin did not disable forced-tool thinking: got %q, body=%s", got, body)
 		}
 		for _, prefix := range []string{"default", "default_raw", "override", "override_raw"} {
-			if !gjson.GetBytes(body, prefix+"_matched").Bool() || gjson.GetBytes(body, prefix+"_unmatched").Exists() {
+			if !gjson.GetBytes(body, prefix+"_unmatched").Bool() || gjson.GetBytes(body, prefix+"_matched").Exists() {
 				t.Fatalf("%s matched pre-builtin conditions (stream=%v): %s", prefix, stream, body)
 			}
 		}
-		if gjson.GetBytes(body, "metadata").Exists() || !gjson.GetBytes(body, "system").Exists() {
-			t.Fatalf("filters matched pre-builtin conditions (stream=%v): %s", stream, body)
+		if !gjson.GetBytes(body, "metadata").Exists() || gjson.GetBytes(body, "system").Exists() {
+			t.Fatalf("filters did not preserve metadata for disabled thinking (stream=%v): %s", stream, body)
 		}
 	}
 }

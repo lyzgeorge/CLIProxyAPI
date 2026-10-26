@@ -19,8 +19,8 @@ func TestReconcileClaudeCloakDisplayAfterThinkingOverride(t *testing.T) {
 			}{
 				{name: "disabled removes synthetic display", thinking: `{"type":"disabled","display":"updates"}`, injected: true},
 				{name: "missing type removes synthetic display", thinking: `{"display":"updates"}`, injected: true},
-				{name: "adaptive keeps synthetic display", thinking: `{"type":"adaptive","display":"updates"}`, injected: true, want: "updates"},
-				{name: "enabled keeps synthetic display", thinking: `{"type":"enabled","budget_tokens":2048,"display":"updates"}`, injected: true, want: "updates"},
+				{name: "adaptive keeps existing display", thinking: `{"type":"adaptive","display":"updates"}`, injected: true, want: "updates"},
+				{name: "enabled does not gain synthetic display", thinking: `{"type":"enabled","budget_tokens":2048}`, injected: true},
 				{name: "caller display stays caller owned", thinking: `{"type":"disabled","display":"summarized"}`, want: "summarized"},
 				{name: "payload display stays operator owned", thinking: `{"type":"disabled","display":"omitted"}`, injected: true, touched: true, want: "omitted"},
 				{name: "payload deletion is not refilled", thinking: `{"type":"adaptive"}`, injected: true, touched: true},

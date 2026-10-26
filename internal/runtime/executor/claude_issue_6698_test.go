@@ -72,8 +72,8 @@ func TestClaudeExecutor_Sonnet55ThinkingOffSendsBetweenTools(t *testing.T) {
 					if got := gjson.GetBytes(upstreamBody, "thinking").Raw; got != `{"type":"between_tools"}` {
 						t.Fatalf("upstream thinking = %s, want {\"type\":\"between_tools\"}; body=%s", got, upstreamBody)
 					}
-					if got := gjson.GetBytes(upstreamBody, "output_config.effort"); got.Exists() {
-						t.Errorf("upstream output_config.effort = %s, want absent", got.Raw)
+					if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "medium" {
+						t.Errorf("upstream output_config.effort = %q, want medium", got)
 					}
 					if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 						t.Errorf("upstream context_management = %s, want absent with between_tools", got.Raw)
@@ -188,8 +188,8 @@ func TestClaudeExecutor_AdaptiveOnlyGeminiBudgetAndAuto(t *testing.T) {
 			if gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists() {
 				t.Fatalf("upstream thinking.budget_tokens still present: %s", upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "output_config.effort"); got.Exists() {
-				t.Fatalf("upstream output_config.effort = %s, want absent; body=%s", got.Raw, upstreamBody)
+			if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "medium" {
+				t.Fatalf("upstream output_config.effort = %q, want medium; body=%s", got, upstreamBody)
 			}
 		})
 	}

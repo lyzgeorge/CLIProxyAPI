@@ -182,7 +182,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if oauthToken {
 		betas = append(betas, claudeOAuthBeta)
 	}
-	if requested[claudeContext1MBeta] {
+	if requested[claudeContext1MBeta] || isClaudeOpus55Model(gjson.GetBytes(body, "model").String()) {
 		betas = append(betas, claudeContext1MBeta)
 	}
 	redactThinking := !claudeThinkingDisplaySet(body)
@@ -235,9 +235,13 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if !isProbeOrHelper && (requested[claudeServerSideFallbackBeta] || gjson.GetBytes(body, "fallbacks").Exists()) {
 		betas = append(betas, claudeServerSideFallbackBeta)
 	}
+	model := gjson.GetBytes(body, "model").String()
 	shouldIncludeFallbackCredit := requested[claudeFallbackCreditBeta] ||
 		gjson.GetBytes(body, "fallback_credit_token").Exists() ||
-		(oauthToken && gjson.GetBytes(body, "fallbacks").Exists())
+		(oauthToken && gjson.GetBytes(body, "fallbacks").Exists()) ||
+		isClaudeOpus55Model(model) ||
+		claudeToolChoiceForcesToolUse(body) ||
+		(isProbeOrHelper && gjson.GetBytes(body, "output_config.effort").Exists())
 	if shouldIncludeFallbackCredit {
 		betas = append(betas, claudeFallbackCreditBeta)
 	}
@@ -250,8 +254,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		}
 	}
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
-	if requested[claudeThinkingBindingBeta] || gjson.GetBytes(body, "thinking.block_binding").Exists() ||
-		(claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String()) && thinkingType == "adaptive") {
+	if requested[claudeThinkingBindingBeta] || gjson.GetBytes(body, "thinking.block_binding").Exists() {
 		betas = append(betas, claudeThinkingBindingBeta)
 	}
 	if !isProbeOrHelper && thinkingType != "disabled" && (requested[claudeThinkingDisplayUpdatesBeta] || claudeThinkingDisplayUpdates(body)) {
@@ -381,7 +384,10 @@ func claudeBodyHasSignedThinkingBlock(body []byte) bool {
 	return found
 }
 
-// applyClaudePreservedThinkingBinding makes relayed or reshaped histories
+// applyClaudePreservedThinkingBinding is retained for explicit callers that
+// opt into preserved-thinking binding. The normal executor paths intentionally
+// do not invoke it because Claude Code 2.1.280 does not emit this shape.
+// It makes relayed or reshaped histories
 // survivable on preserved-thinking models: when the request replays signed
 // thinking blocks, default thinking.block_binding.prefix_mismatch_behavior to
 // drop_block so a prefix mismatch (client reconnect resending history, a
@@ -498,7 +504,7 @@ func claudeIncludeInlineTools(body []byte, requested map[string]bool) bool {
 }
 
 func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
-	if requested[claudeMidConvSystemClearAtBeta] || claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String()) {
+	if requested[claudeMidConvSystemClearAtBeta] {
 		return true
 	}
 	found := false
@@ -512,17 +518,24 @@ func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
 	return found
 }
 
+func claudeHelperProfileShape(body []byte) bool {
+	if len(body) == 0 || !helps.IsClaudeProbeOrHelperRequest(body) {
+		return false
+	}
+	model := gjson.GetBytes(body, "model").String()
+	if !isClaudeHaikuModel(model) {
+		return false
+	}
+	return claudeToolChoiceForcesToolUse(body) || gjson.GetBytes(body, "output_config.format.type").String() == "json_schema"
+}
+
 func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 	if len(body) > 0 {
 		if helps.IsClaudeProbeOrHelperRequest(body) {
-			return false
+			return gjson.GetBytes(body, "output_config.effort").Exists()
 		}
 		model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
-		if isClaudeHaikuModel(model) {
-			return false
-		}
-		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-		if thinkingType == "disabled" {
+		if isClaudeHaikuModel(model) && !isClaudeHaiku55Model(model) {
 			return false
 		}
 	}
@@ -912,11 +925,12 @@ func claudeToolChoiceForcesToolUse(body []byte) bool {
 func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
 	if claudeToolChoiceForcesToolUse(body) {
-		// Remove thinking configuration entirely to avoid API error
-		body, _ = sjson.DeleteBytes(body, "thinking")
-		// Adaptive thinking may also set output_config.effort; remove it to avoid
-		// leaking thinking controls when tool_choice forces tool use.
-		body, _ = sjson.DeleteBytes(body, "output_config.effort")
+		// Native Claude Code sends an explicit disabled thinking object on forced
+		// tool requests and keeps output_config.effort alongside it.
+		thinking := gjson.GetBytes(body, "thinking")
+		if !thinking.Exists() || thinking.Get("type").String() != "disabled" {
+			body, _ = sjson.SetRawBytes(body, "thinking", []byte(`{"type":"disabled"}`))
+		}
 		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
 			body, _ = sjson.DeleteBytes(body, "output_config")
 		}
@@ -972,16 +986,19 @@ func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
 	return body
 }
 
-// ensureClaudeCodeOutputDefaults fills the two sampling fields that Claude
-// Code sends on ordinary cloaked turns. Caller-provided values remain intact;
-// helpers, probes, unsupported models, and forced tool turns keep their
-// measured shapes.
+// ensureClaudeCodeOutputDefaults fills the effort sampling field that Claude
+// Code sends on ordinary cloaked turns. Temperature is omitted on ordinary
+// requests, while structured Haiku 4.5 helpers retain their measured value.
+// Caller-provided values remain intact; probes keep their measured shapes.
 func ensureClaudeCodeOutputDefaults(body []byte) []byte {
-	if len(body) == 0 || helps.IsClaudeProbeOrHelperRequest(body) || claudeToolChoiceForcesToolUse(body) {
+	if len(body) == 0 {
 		return body
 	}
-	if !gjson.GetBytes(body, "temperature").Exists() {
+	if claudeHelperProfileShape(body) && !isClaudeHaiku55Model(gjson.GetBytes(body, "model").String()) && !gjson.GetBytes(body, "temperature").Exists() {
 		body, _ = sjson.SetBytes(body, "temperature", float64(1))
+	}
+	if helps.IsClaudeProbeOrHelperRequest(body) {
+		return body
 	}
 	if claudeRequestSupportsEffort(body, nil) && !gjson.GetBytes(body, "output_config.effort").Exists() {
 		body, _ = sjson.SetBytes(body, "output_config.effort", "medium")
@@ -1283,6 +1300,7 @@ func applyClaudeHeadersWithNativeProfile(
 	}
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	helperProfile = helperProfile || claudeHelperProfileShape(body)
 	if !confirmedClaudeCode && !wirePolicy.Cloak && wirePolicy.ExplicitNever && !wirePolicy.Uncloak {
 		det := helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg)
 		if det.ConfirmedShape {
@@ -1434,6 +1452,10 @@ func applyClaudeHeadersWithNativeProfile(
 		if gjson.GetBytes(body, "thinking.block_binding").Exists() {
 			baseBetas = withClaudeBetaAppended(baseBetas, claudeThinkingBindingBeta)
 		}
+		// Measured helper requests omit the Claude Code identity beta.
+		if helperProfile {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeCodeBeta)
+		}
 		// Operator overrides get the last word over the derived and caller betas:
 		// strip filters without re-sorting, append adds missing names at the end.
 		// They only shape the emitted value, so re-applying the header stays stable.
@@ -1444,7 +1466,7 @@ func applyClaudeHeadersWithNativeProfile(
 		for _, beta := range hd.AnthropicBetaAppend {
 			emittedBetas = withClaudeBetaAppended(emittedBetas, beta)
 		}
-		if !wirePolicy.Uncloak && (applyCLIFingerprint || confirmedClaudeCode) {
+		if !wirePolicy.Uncloak && (applyCLIFingerprint || confirmedClaudeCode) && !helperProfile {
 			emittedBetas = withClaudeBetaAppended(emittedBetas, claudeCodeBeta)
 		}
 

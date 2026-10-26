@@ -1074,7 +1074,7 @@ func captureClaudeCodeFableState(before, after []byte, cloaked bool) claudeCodeF
 }
 
 // reconcileClaudeCodeFableModelAfterPayload reconciles model-specific additions
-// (Opus fallback, thinking.display=updates, and # Reporting outcomes system block)
+// (Opus fallback and # Reporting outcomes system block)
 // if payload rules rewrite the request model between Fable 5.1 and non-Fable models.
 func reconcileClaudeCodeFableModelAfterPayload(
 	body []byte,
@@ -1088,7 +1088,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 
-	// Probes and helpers must never carry Fable additions (Opus fallback, display=updates, reporting block)
+	// Probes and helpers must never carry Fable additions (Opus fallback or reporting block).
 	if isProbeOrHelper {
 		if fableState.injectedFallbacks && !payloadTouchedFallbacks {
 			body, _ = sjson.DeleteBytes(body, "fallbacks")
@@ -1141,9 +1141,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		}
 		if gjson.GetBytes(body, "thinking").Exists() {
 			thinkingType := gjson.GetBytes(body, "thinking.type").String()
-			if thinkingType == "adaptive" && !gjson.GetBytes(body, "thinking.display").Exists() && !payloadTouchedDisplay {
-				body, _ = sjson.SetBytes(body, "thinking.display", "updates")
-			} else if thinkingType != "adaptive" && fableState.injectedDisplay && !payloadTouchedDisplay {
+			if thinkingType != "adaptive" && fableState.injectedDisplay && !payloadTouchedDisplay {
 				body, _ = sjson.DeleteBytes(body, "thinking.display")
 			}
 		} else if fableState.injectedDisplay && !payloadTouchedDisplay {
@@ -1172,15 +1170,9 @@ func reconcileClaudeCodeFableModelAfterPayload(
 				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
 			}
 		}
-		if !isProbeOrHelper {
-			body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
-		}
 		return body
 	}
 
-	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
-		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
 	// Payload rules can disable thinking without touching display. Remove only
@@ -1188,10 +1180,6 @@ func reconcileClaudeCodeFableModelAfterPayload(
 	if fableState.injectedDisplay && !payloadTouchedDisplay && (!thinkingActive || !claudeModelUsesProgressDisplay(currentModel)) {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
 	}
-	if !isProbeOrHelper {
-		body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
-	}
-
 	// Remove Reporting outcomes if CPA automatically injected it
 	if fableState.injectedReporting {
 		system := gjson.GetBytes(body, "system")
@@ -1535,9 +1523,8 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 	contextManagement := gjson.GetBytes(payload, "context_management")
 
 	// Any thinking value the strategy does not accept must drop an object CPA
-	// injected itself. disableThinkingIfToolChoiceForced deletes the whole
-	// thinking field after injection, so this also covers a request that was
-	// still eligible when injectClaudeCodeContextManagement ran.
+	// injected itself. Forced tool-choice processing marks thinking disabled,
+	// so this also covers a request that was still eligible when injection ran.
 	if !claudeThinkingAcceptsClearThinking(payload) {
 		if state.callerOwned || !state.automaticallyInjected {
 			return payload
@@ -1856,18 +1843,11 @@ func applyCloakingInternal(
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
-		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 	}
-	if !isProbeOrHelper {
-		payload = applyClaudeCloakThinkingDisplay(payload, false)
-	}
-
 	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
 	// 1h ttl is stripped to match extended-cache-ttl beta suppression. Subagents
 	// preserve caller-requested 1h cache TTL (e.g. subagentPromptCacheTtl: 1h).
