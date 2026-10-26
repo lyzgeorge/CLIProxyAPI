@@ -85,6 +85,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
+	forcedToolChoice := e.upstreamRequestLogProvider() == "claude" &&
+		(isClaudeOpus55Model(upstreamModel) || isClaudeSonnet55Model(upstreamModel)) &&
+		claudeToolChoiceForcesToolUse(body)
+	ctx = withClaudeForcedToolChoice(ctx, forcedToolChoice)
 	body = helps.NormalizeClaudeToolChoice(e.upstreamRequestLogProvider(), upstreamModel, body)
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
@@ -160,7 +164,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
 	// caller-owned requests. Unified cloaked requests always run section-independent ensure so cloaking's
 	// first-user marker cannot suppress system/latest-user breakpoints.
-	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode, originalPayload, req.Payload)
+	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode, originalPayload, req.Payload) && !forcedToolChoice
 	if cpaOwnsCacheControl {
 		body = ensureCacheControl(body)
 	}
@@ -245,6 +249,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if claudeCompactionSummaryFromContext(ctx) {
 		bodyForUpstream = finalizeClaudeCompactionSummaryBody(bodyForUpstream)
 	}
+	bodyForUpstream = applyClaudePreservedThinkingBinding(bodyForUpstream)
 	bodyForUpstream = helps.StripClaudeRequestMarkers(bodyForUpstream)
 	// User rules match the fully prepared business body and are applied only once.
 	var touchedPayloadPaths map[string]bool

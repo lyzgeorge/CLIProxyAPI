@@ -25,6 +25,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type claudeForcedToolChoiceContextKey struct{}
+
+func withClaudeForcedToolChoice(ctx context.Context, forced bool) context.Context {
+	return context.WithValue(ctx, claudeForcedToolChoiceContextKey{}, forced)
+}
+
+func claudeForcedToolChoiceFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	forced, _ := ctx.Value(claudeForcedToolChoiceContextKey{}).(bool)
+	return forced
+}
+
 func resolveIncomingClaudeHeaders(ctx context.Context, incoming http.Header) http.Header {
 	resolved := make(http.Header)
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1776,7 +1790,7 @@ func applyCloakingInternal(
 	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheModeContext(ctx)
 	// Strict mode drops caller system prompts entirely, so nothing needs a
 	// destination and an unusable block cannot lose information.
-	if !settings.strictMode {
+	if !settings.strictMode && !claudeForcedToolChoiceFromContext(ctx) {
 		if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(payload, "system")); errSystem != nil {
 			return nil, false, errSystem
 		}
@@ -1825,20 +1839,22 @@ func applyCloakingInternal(
 	if isExplicit {
 		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
 	}
-	payload = checkSystemInstructionsWithSigningModeAt(
-		payload,
-		settings.strictMode,
-		cchSigning,
-		billingVersion,
-		"cli",
-		workload,
-		pinnedDate,
-		isSubagent,
-		prevReq,
-		promptID,
-		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
-		turnOriginArgs...,
-	)
+	if !claudeForcedToolChoiceFromContext(ctx) {
+		payload = checkSystemInstructionsWithSigningModeAt(
+			payload,
+			settings.strictMode,
+			cchSigning,
+			billingVersion,
+			"cli",
+			workload,
+			pinnedDate,
+			isSubagent,
+			prevReq,
+			promptID,
+			!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+			turnOriginArgs...,
+		)
+	}
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
