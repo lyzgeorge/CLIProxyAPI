@@ -9,6 +9,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -279,9 +280,9 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 				entry["description"] = desc.String()
 			}
 			if params := tool.Get("parameters"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
+				entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 			} else if params := tool.Get("parametersJsonSchema"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
+				entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 			}
 			normalized = append(normalized, entry)
 			return true
@@ -300,9 +301,9 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 					entry["description"] = desc.String()
 				}
 				if params := decl.Get("parameters"); params.Exists() {
-					entry["parameters"] = json.RawMessage(params.Raw)
+					entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 				} else if params := decl.Get("parametersJsonSchema"); params.Exists() {
-					entry["parameters"] = json.RawMessage(params.Raw)
+					entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 				}
 				normalized = append(normalized, entry)
 			}
@@ -355,11 +356,19 @@ func geminiPartFileData(part gjson.Result) gjson.Result {
 
 func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	_ = ctx
+	// Vertex stream paths pass SSE lines, while the Gemini executor passes bare payloads.
+	rawJSON = bytes.TrimSpace(rawJSON)
+	if after, ok := bytes.CutPrefix(rawJSON, []byte("data:")); ok {
+		rawJSON = bytes.TrimSpace(after)
+	}
+	if len(rawJSON) == 0 || rawJSON[0] == ':' || bytes.HasPrefix(rawJSON, []byte("event:")) || bytes.HasPrefix(rawJSON, []byte("id:")) || bytes.HasPrefix(rawJSON, []byte("retry:")) {
+		return nil
+	}
 	if *param == nil {
 		*param = &StreamState{ID: fmt.Sprintf("interaction_%d", time.Now().UnixNano())}
 	}
 	st := (*param).(*StreamState)
-	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
+	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		var out [][]byte
 		if !st.Completed {
 			out = appendInteractionsStepStop(out, st)
