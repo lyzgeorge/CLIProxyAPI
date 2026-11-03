@@ -194,7 +194,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		if claudeIncludePerTurnTiming(body, requested) {
 			betas = append(betas, claudePerTurnTimingBeta)
 		}
-		if !isClaudeSonnet5Model(ojson.GetBytesNoCopy(body, "model").String()) {
+		if requested[claudeMidConvToolChangesBeta] {
 			betas = append(betas, claudeMidConvToolChangesBeta)
 		}
 		if claudeIncludeInlineTools(body, requested) {
@@ -244,8 +244,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		}
 	}
 	thinkingType := ojson.GetBytesNoCopy(body, "thinking.type").String()
-	if requested[claudeThinkingBindingBeta] || ojson.GetBytesNoCopy(body, "thinking.block_binding").Exists() ||
-		(claudeModelUsesProgressDisplay(ojson.GetBytesNoCopy(body, "model").String()) && thinkingType == "adaptive") {
+	if requested[claudeThinkingBindingBeta] || ojson.GetBytesNoCopy(body, "thinking.block_binding").Exists() {
 		betas = append(betas, claudeThinkingBindingBeta)
 	}
 	if !isProbeOrHelper && thinkingType != "disabled" && (requested[claudeThinkingDisplayUpdatesBeta] || claudeThinkingDisplayUpdates(body)) {
@@ -526,9 +525,10 @@ func claudeIncludeInlineTools(body []byte, requested map[string]bool) bool {
 }
 
 func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
-	if requested[claudeMidConvSystemClearAtBeta] || claudeModelUsesProgressDisplay(ojson.GetBytesNoCopy(body, "model").String()) {
+	if requested[claudeMidConvSystemClearAtBeta] {
 		return true
 	}
+	// Only include if the body actually uses clear_at — not based on model alone.
 	found := false
 	ojson.GetBytesNoCopy(body, "messages").ForEach(func(_, msg ojson.Result) bool {
 		if msg.Get("clear_at").Exists() {

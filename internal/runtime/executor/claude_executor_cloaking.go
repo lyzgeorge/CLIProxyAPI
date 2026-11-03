@@ -854,10 +854,8 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, agentCC)
 
 	systemBlocks := []string{billingBlock, agentBlock}
-	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if isClaudeFable51Model(model) && !isClaudeProbeOrHelperRequestDoc(doc) {
-		systemBlocks = append(systemBlocks, buildTextBlock(claudeCodeFableReportingOutcomes, nil))
-	}
+	// Fable 5.1 native captures send no fallback or # Reporting outcomes system
+	// block; both are caller-owned. Keep only billing + identity top-level blocks.
 	_ = doc.SetRawBytes("system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	if strictMode {
 		injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
