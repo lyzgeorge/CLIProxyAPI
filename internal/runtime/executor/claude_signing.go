@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const (
@@ -56,6 +56,19 @@ func finalizeAnthropicMessagesBodyCCH(body []byte, fallbackBilling string) ([]by
 	return signAnthropicMessagesBody(bodyWithPlaceholder)
 }
 
+// ensureClaudeBillingHeader keeps generated continuity metadata while
+// intentionally omitting the per-request CCH marker.
+func ensureClaudeBillingHeader(body []byte, fallbackBilling string) ([]byte, error) {
+	billing := ojson.GetBytes(body, "system.0.text")
+	if billing.Type == ojson.String && strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {
+		return body, nil
+	}
+	if fallbackBilling == "" {
+		return body, nil
+	}
+	return prependClaudeBillingSystemBlock(body, fallbackBilling)
+}
+
 // claudeBodyNeedsBillingFallback reports whether a confirmed native helper request
 // still needs CPA's billing-header fallback.
 //
@@ -66,7 +79,7 @@ func finalizeAnthropicMessagesBodyCCH(body []byte, fallbackBilling string) ([]by
 // system prompt, the fallback comes back and the request cannot go upstream with a
 // system block that native would never send unsigned.
 func claudeBodyNeedsBillingFallback(body []byte) bool {
-	return ojson.GetBytesNoCopy(body, "system").Exists()
+	return ojson.GetBytes(body, "system").Exists()
 }
 
 func claudeBodyNeedsBillingFallbackDoc(doc *ojson.Doc) bool {
@@ -74,7 +87,7 @@ func claudeBodyNeedsBillingFallbackDoc(doc *ojson.Doc) bool {
 }
 
 func ensureClaudeBillingHeaderCCHPlaceholder(body []byte, fallbackBilling string) ([]byte, error) {
-	billing := ojson.GetBytesNoCopy(body, "system.0.text")
+	billing := ojson.GetBytes(body, "system.0.text")
 	if billing.Type != ojson.String || !strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {
 		if fallbackBilling == "" {
 			return body, nil
@@ -84,7 +97,7 @@ func ensureClaudeBillingHeaderCCHPlaceholder(body []byte, fallbackBilling string
 		if errPrepend != nil {
 			return nil, errPrepend
 		}
-		billing = ojson.GetBytesNoCopy(body, "system.0.text")
+		billing = ojson.GetBytes(body, "system.0.text")
 	}
 	if _, ok := claudeBillingCCHDigitsOffset(body); ok {
 		return body, nil
@@ -125,7 +138,6 @@ func ensureClaudeBillingHeaderCCHPlaceholderDoc(doc *ojson.Doc, fallbackBilling 
 	if claudeBillingRawHasCCHDigits(billing.Raw) {
 		return nil
 	}
-
 	billingText := billing.String()
 	entrypoint := strings.Index(billingText, "cc_entrypoint=")
 	if entrypoint < 0 {
@@ -144,11 +156,44 @@ func ensureClaudeBillingHeaderCCHPlaceholderDoc(doc *ojson.Doc, fallbackBilling 
 }
 
 func prependClaudeBillingSystemBlock(body []byte, billingText string) ([]byte, error) {
-	doc := ojson.NewDoc(body)
-	if errPrepend := prependClaudeBillingSystemBlockDoc(doc, billingText); errPrepend != nil {
-		return nil, errPrepend
+	billingBlock := []byte(buildTextBlock(billingText, nil))
+	system := ojson.GetBytes(body, "system")
+	var systemArray []byte
+	switch {
+	case system.Type == ojson.String:
+		originalBlock := []byte(buildTextBlock(system.String(), nil))
+		systemArray = make([]byte, 0, len(billingBlock)+len(originalBlock)+3)
+		systemArray = append(systemArray, '[')
+		systemArray = append(systemArray, billingBlock...)
+		systemArray = append(systemArray, ',')
+		systemArray = append(systemArray, originalBlock...)
+		systemArray = append(systemArray, ']')
+	case system.IsArray():
+		rawSystem := bytes.TrimSpace([]byte(system.Raw))
+		if bytes.Equal(rawSystem, []byte("[]")) {
+			systemArray = make([]byte, 0, len(billingBlock)+2)
+			systemArray = append(systemArray, '[')
+			systemArray = append(systemArray, billingBlock...)
+			systemArray = append(systemArray, ']')
+		} else {
+			systemArray = make([]byte, 0, len(billingBlock)+len(rawSystem)+1)
+			systemArray = append(systemArray, '[')
+			systemArray = append(systemArray, billingBlock...)
+			systemArray = append(systemArray, ',')
+			systemArray = append(systemArray, rawSystem[1:]...)
+		}
+	default:
+		systemArray = make([]byte, 0, len(billingBlock)+2)
+		systemArray = append(systemArray, '[')
+		systemArray = append(systemArray, billingBlock...)
+		systemArray = append(systemArray, ']')
 	}
-	return doc.Bytes(), nil
+
+	updated, err := ojson.SetRawBytes(body, "system", systemArray)
+	if err != nil {
+		return nil, fmt.Errorf("prepend Claude CCH billing block: %w", err)
+	}
+	return updated, nil
 }
 
 func prependClaudeBillingSystemBlockDoc(doc *ojson.Doc, billingText string) error {
@@ -187,7 +232,6 @@ func prependClaudeBillingSystemBlockDoc(doc *ojson.Doc, billingText string) erro
 		systemArray = append(systemArray, billingBlock...)
 		systemArray = append(systemArray, ']')
 	}
-
 	if errSet := doc.SetRawBytes("system", systemArray); errSet != nil {
 		return fmt.Errorf("prepend Claude CCH billing block: %w", errSet)
 	}
@@ -225,6 +269,9 @@ func stripDefaultKimiClaudeCodeAttribution(auth *cliproxyauth.Auth, endpoint str
 	return util.StripClaudeCodeAttributionSystem(body)
 }
 
+// claudeCCHSigningEnabled retains the historical credential/origin gate for
+// billing fallback and continuity metadata. The request paths no longer generate
+// or sign CCH, and remove caller CCH before applying user payload rules.
 func stripDefaultKimiClaudeCodeAttributionDoc(auth *cliproxyauth.Auth, endpoint string, cliFingerprint bool, doc *ojson.Doc) bool {
 	if cliFingerprint || !isKimiMessagesUpstream(auth, endpoint) {
 		return false
@@ -270,31 +317,6 @@ func stripClaudeCodeAttributionSystemDoc(doc *ojson.Doc) bool {
 	return doc.SetRawBytes("system", []byte("["+strings.Join(kept, ",")+"]")) == nil
 }
 
-// claudeCCHSigningEnabled applies CPA's CCH policy.
-//
-// Native gate, identical in Claude Code 2.1.220 through 2.1.234:
-//
-//	s = (provider === "firstParty" && isFirstPartyBaseURL()) || provider === "vertex"
-//	      ? " cch=00000;" : ""
-//
-// where isFirstPartyBaseURL() is true when ANTHROPIC_BASE_URL is unset or its
-// host is api.anthropic.com. Every other backend (bedrock, foundry, mantle,
-// anthropicAws, anthropicGoogleCloud, gateway, any custom base URL) sends the
-// billing header without cch.
-//
-// CPA maps that onto two authorities:
-//
-//   - A real Claude OAuth credential always signs, on every upstream. CPA is the
-//     hop that restores the first-party shape: a downstream Claude Code pointed at
-//     CPA sees a non-first-party base URL and therefore omits cch itself, so the
-//     value has to be regenerated here rather than inherited.
-//   - An API key or delegated provider signs only when it explicitly opted into
-//     the claude-code-cli profile AND the upstream is one the native gate accepts.
-//     On any other gateway the billing header still goes out, but without cch, so
-//     a per-request hash cannot bust that gateway's prompt cache.
-//
-// origin is the concrete upstream URL of the request being built. CPA additionally
-// requires https and the default port, which native does not check.
 func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool, origin string) bool {
 	if isClaudeOAuthToken(apiKey) {
 		return true
@@ -308,8 +330,8 @@ func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFinge
 	return kind == claudeCCHUpstreamAnthropic && isAnthropicUpstreamBase(origin)
 }
 
-// signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.
-// It changes only the five CCH digits in the outgoing body.
+// signAnthropicMessagesBody retains Claude Code 2.1.220's CCH implementation for
+// reference vectors. The executor request paths do not call it.
 func signAnthropicMessagesBody(body []byte) ([]byte, error) {
 	cchOffset, ok := claudeBillingCCHDigitsOffset(body)
 	if !ok {
@@ -351,7 +373,7 @@ func claudeBillingRawHasCCHDigits(rawStr string) bool {
 }
 
 func claudeBillingCCHDigitsOffset(body []byte) (int, bool) {
-	billing := ojson.GetBytesNoCopy(body, "system.0.text")
+	billing := ojson.GetBytes(body, "system.0.text")
 	if billing.Type != ojson.String || !strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {
 		return 0, false
 	}

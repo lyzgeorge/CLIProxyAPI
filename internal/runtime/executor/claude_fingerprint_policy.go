@@ -5,11 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,16 +29,15 @@ var claudeFingerprintProfileWarned sync.Map
 // claudeFingerprintPolicy is a single switch-driven view of Claude fingerprint
 // behavior for Anthropic Messages. The heavy algorithms stay shared:
 //   - betas: claudeCodeCLIBetas(..., useOAuthBetas)
-//   - CCH: claudeCCHSigningEnabled / finalizeAnthropicMessagesBodyCCH
+//   - billing metadata gate: claudeCCHSigningEnabled (CCH itself is omitted)
 //   - identity: EnsureClaudeCLIFingerprintIdentity + ApplyClaudeCredentialMetadata
 //
-// Goal: Anthropic Messages API keys, custom gateways, and delegated providers
-// (such as Kimi) can opt into the Claude Code OAuth CLI request fingerprint via
-// fingerprint-profile=claude-code-cli, without OAuth control-plane semantics.
-// Real Claude OAuth tokens always keep the strict CLI fingerprint. First-party
-// api.anthropic.com API keys stay caller-owned by default and only take the CLI
-// Messages fingerprint when this field is set. MCP aliases and diagnostics are
-// wire fingerprint behavior; refresh, profile and cancellation stay gated on
+// Goal: keep the Claude wire fingerprint independent from authentication. The
+// unified cloak applies it to API keys, custom gateways, and delegated providers
+// without granting them OAuth control-plane semantics.
+// Real Claude OAuth tokens always keep the strict CLI fingerprint. The unified
+// cloak applies the emitted CLI Messages fingerprint to API keys and delegated
+// providers as well, while refresh, profile and cancellation remain gated on
 // AuthIsOAuthToken.
 type claudeFingerprintPolicy struct {
 	AuthIsOAuthToken     bool
@@ -92,8 +91,8 @@ func claudeFingerprintProfileFromConfig(cfg *config.Config, auth *cliproxyauth.A
 
 // resolveClaudeFingerprintPolicy resolves credential-scoped fingerprint
 // behavior. It is deliberately independent of the upstream origin: the wire
-// profile follows the credential, while the one origin-sensitive decision (CCH
-// signing) is resolved separately by claudeCCHSigningEnabled.
+// profile follows the credential, while the origin-sensitive billing metadata
+// gate is resolved separately by claudeCCHSigningEnabled.
 func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) claudeFingerprintPolicy {
 	// Keep actual Claude OAuth lifecycle authority separate from the broader
 	// request fingerprint policy used by API keys and delegated providers.
@@ -131,15 +130,15 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 // API keys seed the synthesized identity from the key itself; delegated
 // providers such as Kimi seed from the stable auth identity, so an access-token
 // rotation does not rotate the device fingerprint.
-func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize bool) ([]byte, error) {
+func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize, cacheUserID bool) ([]byte, error) {
 	doc := ojson.NewDoc(body)
-	if errApply := applyClaudeCLIIdentityDoc(doc, auth, apiKey, upstreamURL, sessionID, synthesize); errApply != nil {
+	if errApply := applyClaudeCLIIdentityDoc(doc, auth, apiKey, upstreamURL, sessionID, synthesize, cacheUserID); errApply != nil {
 		return nil, errApply
 	}
 	return doc.Bytes(), nil
 }
 
-func applyClaudeCLIIdentityDoc(doc *ojson.Doc, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize bool) error {
+func applyClaudeCLIIdentityDoc(doc *ojson.Doc, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize, cacheUserID bool) error {
 	identitySeed := apiKey
 	if isKimiMessagesUpstream(auth, upstreamURL) {
 		identitySeed = helps.ClaudeCLIAuthIdentitySeed(auth)
@@ -148,7 +147,7 @@ func applyClaudeCLIIdentityDoc(doc *ojson.Doc, auth *cliproxyauth.Auth, apiKey, 
 	if errIdentity != nil {
 		return fmt.Errorf("ensure Claude CLI fingerprint identity: %w", errIdentity)
 	}
-	if _, errApply := helps.ApplyClaudeCredentialMetadataDoc(doc, identityAuth, sessionID); errApply != nil {
+	if _, errApply := helps.ApplyClaudeCredentialMetadataDoc(doc, identityAuth, sessionID, cacheUserID); errApply != nil {
 		return fmt.Errorf("apply Claude credential metadata: %w", errApply)
 	}
 	return nil

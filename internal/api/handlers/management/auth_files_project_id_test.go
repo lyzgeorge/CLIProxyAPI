@@ -52,6 +52,65 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_IncludesRequestsPerMinuteFromManager(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	authDir := t.TempDir()
+	fileName := "claude-rpm.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"claude","requests_per_minute":9}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "claude", "requests_per_minute": 9},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	entry := firstAuthFileEntry(t, h)
+	if got, ok := entry["requests_per_minute"].(float64); !ok || got != 9 {
+		t.Fatalf("requests_per_minute = %#v, want JSON number 9", entry["requests_per_minute"])
+	}
+
+	t.Run("v8 renewal metadata", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil)
+		ginCtx.Set(ConfigV8ContextKey, true)
+		h.ListAuthFiles(ginCtx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Files []map[string]any `json:"files"`
+		}
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("unmarshal credentials: %v", errUnmarshal)
+		}
+		if len(response.Files) != 1 {
+			t.Fatalf("len(files) = %d, want 1", len(response.Files))
+		}
+		v8Entry := response.Files[0]
+		if got := v8Entry["requests_per_minute"]; got != float64(9) {
+			t.Fatalf("requests_per_minute = %#v, want JSON number 9", got)
+		}
+		if got := v8Entry["renewal_state"]; got != coreauth.RenewalStateAwaitingFirstRenewal {
+			t.Fatalf("renewal_state = %#v, want %q", got, coreauth.RenewalStateAwaitingFirstRenewal)
+		}
+		if got := v8Entry["requires_sign_in"]; got != false {
+			t.Fatalf("requires_sign_in = %#v, want false", got)
+		}
+	})
+}
+
 func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

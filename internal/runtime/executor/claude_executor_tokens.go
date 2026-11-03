@@ -23,6 +23,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	ctx = withClaudeProfileRateLimit(ctx, e.cfg, auth, apiKey)
 	// Only Anthropic's first-party origin has the measured native count_tokens
 	// contract. Every custom/third-party base URL keeps local estimation,
 	// regardless of whether the credential is OAuth or an API key.
@@ -66,6 +67,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
+	body = doc.Bytes()
+	body = helps.StripClaudeRequestMarkers(body)
+	doc = ojson.NewDoc(body)
 	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)
 	ctx = helps.WithPayloadFinalizer(ctx, finalize)
 	helps.FinalizePayloadDoc(ctx, doc)
@@ -164,7 +168,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	confirmedClaudeCode := isEffectiveConfirmedClaudeCode(claudeCodeDetection, initialPolicy)
 	claudeSessionID := ""
 	if fp.ProfileClaudeCodeCLI {
-		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
+		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequestWithFallback(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, claudeSessionFallbackKey(auth, apiKey), opts.Metadata, req.Metadata)
 	}
 	webSearchSessionKey, webSearchTTL, _ := e.claudeWebSearchResultCacheScope(ctx, auth, from, req, opts, originalPayload)
 	ctx = helps.WithClaudeWebSearchResultRestore(ctx, webSearchSessionKey, webSearchTTL)
@@ -228,6 +232,8 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
+	body = doc.Bytes()
+	body = helps.StripClaudeRequestMarkers(body)
 	stripPromptCacheOptionsDoc(doc)
 	// Two different reasons converge on the same deletions, and they must stay
 	// separable.
@@ -260,14 +266,14 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	helps.FinalizePayloadDoc(ctx, doc)
 	stripPromptCacheOptionsDoc(doc)
 	body = doc.Bytes()
-	if errMidSystem := validateClaudeMidSystemMessageModel(body, confirmedClaudeCode, directAnthropic); errMidSystem != nil {
+	if errMidSystem := validateClaudeMidSystemMessageModel(body, confirmedClaudeCode && !cloaked, directAnthropic); errMidSystem != nil {
 		return cliproxyexecutor.Response{}, errMidSystem
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, body, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, body, e.cfg, incomingHeaders, confirmedClaudeCode, claudeSessionID); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	var authID, authLabel, authType, authValue string

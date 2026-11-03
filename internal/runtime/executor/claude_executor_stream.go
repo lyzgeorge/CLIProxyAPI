@@ -37,13 +37,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
+	ctx = withClaudeProfileRateLimit(ctx, e.cfg, auth, apiKey)
 	defer func() {
 		if cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, err); cancelErr != nil {
 			err = cancelErr
 		}
 	}()
-	// Same split as Execute: OAuth signs everywhere, an opted-in API key only on
-	// upstreams the native gate accepts.
+	// Preserve the native billing metadata, but omit the per-request CCH marker.
 	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, url)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
@@ -73,8 +73,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	wirePolicy, wireSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, claudeCodeDetection.Confirmed)
 	confirmedClaudeCode := isEffectiveConfirmedClaudeCode(claudeCodeDetection, wirePolicy)
 	claudeSessionID := ""
-	if fp.ProfileClaudeCodeCLI {
-		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
+	if fp.ProfileClaudeCodeCLI || wirePolicy.Cloak {
+		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequestWithFallback(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, claudeSessionFallbackKey(auth, apiKey), opts.Metadata, req.Metadata)
 	}
 
 	continuityCtx := &helps.ClaudeContinuityContext{}
@@ -95,6 +95,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	doc := ojson.NewDoc(body)
 	helps.SetStringIfDifferentDoc(doc, "model", upstreamModel)
+	forcedToolChoice := e.upstreamRequestLogProvider() == "claude" &&
+		(isClaudeOpus55Model(upstreamModel) || isClaudeSonnet55Model(upstreamModel)) &&
+		claudeToolChoiceForcesToolUseDoc(doc)
+	ctx = withClaudeForcedToolChoice(ctx, forcedToolChoice)
 	helps.NormalizeClaudeToolChoiceDoc(e.upstreamRequestLogProvider(), upstreamModel, doc)
 
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); err != nil {
@@ -160,15 +164,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	disableThinkingIfToolChoiceForcedDoc(doc)
 	reconcileClaudeCodeContextManagementDoc(doc, contextManagementState)
-	normalizeClaudeSamplingForUpstreamDoc(doc, confirmedClaudeCode)
+	normalizeClaudeSamplingForUpstreamDoc(doc, confirmedClaudeCode && !cloaked)
+	if cloaked || confirmedClaudeCode {
+		body = doc.Bytes()
+		body = ensureClaudeCodeOutputDefaults(body)
+		doc = ojson.NewDoc(body)
+	}
 
 	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
-	// non-native callers. Confirmed native Claude Code owns its marker placement and must
-	// not be rewritten. Cloaked requests always run section-independent ensure so cloaking's
+	// caller-owned requests. Unified cloaked requests always run section-independent ensure so cloaking's
 	// first-user marker cannot suppress system/latest-user breakpoints.
-	// cloaked and confirmedClaudeCode are mutually exclusive: resolveClaudeWirePolicy
-	// forces Cloak off for a confirmed native client.
-	cpaOwnsCacheControl := shouldEnsureCacheControlDoc(doc, cloaked, confirmedClaudeCode, originalPayload, req.Payload)
+	cpaOwnsCacheControl := shouldEnsureCacheControlDoc(doc, cloaked, confirmedClaudeCode, originalPayload, req.Payload) && !forcedToolChoice
 	if cpaOwnsCacheControl {
 		ensureCacheControlDoc(doc)
 	}
@@ -216,8 +222,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
-	if fp.ApplyCLIIdentity {
-		err = applyClaudeCLIIdentityDoc(doc, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
+	if fp.ApplyCLIIdentity || cloaked {
+		// The unified cloak always emits a CPA-owned device/account/session
+		// identity. Non-OAuth credentials receive a deterministic synthetic
+		// credential identity; OAuth credentials use their stored identity.
+		err = applyClaudeCLIIdentityDoc(doc, auth, apiKey, url, claudeSessionID, !fp.AuthIsOAuthToken, true)
 		if err != nil {
 			return nil, err
 		}
@@ -231,10 +240,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallbackDoc(doc) {
 			cchBilling = claudeCCHFallbackBillingHeaderDoc(ctx, e.cfg, doc, claudeCodeDetection.Entrypoint)
 		}
-		err = ensureClaudeBillingHeaderCCHPlaceholderDoc(doc, cchBilling)
+		bodyForCCH := doc.Bytes()
+		bodyForCCH, err = ensureClaudeBillingHeader(bodyForCCH, cchBilling)
 		if err != nil {
-			return nil, fmt.Errorf("finalize Claude CCH: %w", err)
+			return nil, fmt.Errorf("finalize Claude billing header: %w", err)
 		}
+		doc = ojson.NewDoc(bodyForCCH)
 	}
 	stripDefaultKimiClaudeCodeAttributionDoc(auth, url, fp.ProfileClaudeCodeCLI, doc)
 	applyClaudePreservedThinkingBindingDoc(doc)
@@ -250,16 +261,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, _ = extractAndRemoveBetasDoc(doc)
 	stripPromptCacheOptionsDoc(doc)
 	bodyForUpstream := doc.Bytes()
+	bodyForUpstream = helps.StripClaudeRequestMarkers(bodyForUpstream)
 	body = bodyForUpstream
 	bodyForTranslation := bodyForUpstream
-	if cchSigning {
-		bodyForUpstream, err = signAnthropicMessagesBody(bodyForUpstream)
-		if err != nil {
-			return nil, fmt.Errorf("sign Claude CCH: %w", err)
-		}
-	}
 	// Read-only validation must observe the final configured model and messages.
-	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
+	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode && !cloaked, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
 		return nil, errMidSystem
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())

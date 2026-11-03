@@ -57,6 +57,31 @@ func TestRequestRetryOverride(t *testing.T) {
 	}
 }
 
+func TestRequestsPerMinuteOverride(t *testing.T) {
+	var unset *Auth
+	if got, ok := unset.RequestsPerMinuteOverride(); ok || got != 0 {
+		t.Fatalf("nil auth override = (%d, %t), want (0, false)", got, ok)
+	}
+	for _, tc := range []struct {
+		name string
+		meta map[string]any
+		want int
+		ok   bool
+	}{
+		{name: "canonical", meta: map[string]any{"requests_per_minute": 12}, want: 12, ok: true},
+		{name: "legacy", meta: map[string]any{"requests-per-minute": "5"}, want: 5, ok: true},
+		{name: "zero disables", meta: map[string]any{"requests_per_minute": 0}, want: 0, ok: true},
+		{name: "negative disables", meta: map[string]any{"requests_per_minute": -1}, want: 0, ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := (&Auth{Metadata: tc.meta}).RequestsPerMinuteOverride()
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("override = (%d, %t), want (%d, %t)", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestToolPrefixDisabled(t *testing.T) {
 	var a *Auth
 	if a.ToolPrefixDisabled() {

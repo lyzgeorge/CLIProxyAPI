@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,10 +39,24 @@ func (e *claudeFastRequestError) Unwrap() error {
 }
 
 func (e *claudeFastRequestError) StatusCode() int {
-	if e == nil || (e.status >= http.StatusOK && e.status < http.StatusMultipleChoices) {
+	if e == nil {
 		return 0
 	}
-	return e.status
+	if e.status >= http.StatusOK && e.status < http.StatusMultipleChoices {
+		var statusProvider interface{ StatusCode() int }
+		if errors.As(e.cause, &statusProvider) && statusProvider != nil {
+			return statusProvider.StatusCode()
+		}
+		return 0
+	}
+	if e.status != 0 {
+		return e.status
+	}
+	var statusProvider interface{ StatusCode() int }
+	if errors.As(e.cause, &statusProvider) && statusProvider != nil {
+		return statusProvider.StatusCode()
+	}
+	return 0
 }
 
 func (e *claudeFastRequestError) IsRequestScoped() bool {
@@ -73,6 +88,14 @@ func (e *claudeFastRequestError) RetryAfter() *time.Duration {
 		return nil
 	}
 	return e.retryAfter
+}
+
+func (e *claudeFastRequestError) SafeResponseHeaders() http.Header {
+	if e == nil || e.retryAfter == nil {
+		return nil
+	}
+	seconds := claudeRetryAfterSeconds(*e.retryAfter)
+	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
 }
 
 // claudeFastDirectResponseError carries an upstream HTTP error response through

@@ -160,8 +160,8 @@ func (h *ClaudeCodeAPIHandler) writeClaudeMaxTokensOneProbeResponse(c *gin.Conte
 		return false
 	}
 
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Exists() && streamResult.Type == gjson.True {
+	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
+	if streamResult.Exists() && streamResult.Type == ojson.True {
 		h.writeClaudeMaxTokensOneProbeStream(c, rawJSON)
 		return true
 	}
@@ -175,15 +175,16 @@ func (h *ClaudeCodeAPIHandler) writeClaudeMaxTokensOneProbeResponse(c *gin.Conte
 }
 
 func isClaudeMaxTokensOneProbe(rawJSON []byte) bool {
-	maxTokens := gjson.GetBytes(rawJSON, "max_tokens")
-	return maxTokens.Exists() && maxTokens.Type == gjson.Number && maxTokens.Num == 1
+	maxTokens := ojson.GetBytesNoCopy(rawJSON, "max_tokens")
+	return maxTokens.Exists() && maxTokens.Type == ojson.Number && maxTokens.Num == 1
 }
 
 func claudeMaxTokensOneProbeBody(rawJSON []byte) []byte {
 	body := []byte(`{"id":"msg_cli_proxy_probe","type":"message","role":"assistant","model":"","content":[{"type":"text","text":"ok"}],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
-	if model := gjson.GetBytes(rawJSON, "model").String(); model != "" {
-		if updated, err := sjson.SetBytes(body, "model", model); err == nil {
-			body = updated
+	if model := ojson.GetBytesNoCopy(rawJSON, "model").String(); model != "" {
+		doc := ojson.NewDoc(body)
+		if errSet := doc.Set("model", model); errSet == nil {
+			body = doc.Bytes()
 		}
 	}
 	return body
@@ -195,11 +196,12 @@ func (h *ClaudeCodeAPIHandler) writeClaudeMaxTokensOneProbeStream(c *gin.Context
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	model := gjson.GetBytes(rawJSON, "model").String()
+	model := ojson.GetBytesNoCopy(rawJSON, "model").String()
 	messageStart := []byte(`{"type":"message_start","message":{"id":"msg_cli_proxy_probe","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
 	if model != "" {
-		if updated, err := sjson.SetBytes(messageStart, "message.model", model); err == nil {
-			messageStart = updated
+		doc := ojson.NewDoc(messageStart)
+		if errSet := doc.Set("message.model", model); errSet == nil {
+			messageStart = doc.Bytes()
 		}
 	}
 

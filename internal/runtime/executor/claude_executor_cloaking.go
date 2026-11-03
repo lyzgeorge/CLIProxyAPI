@@ -28,6 +28,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type claudeForcedToolChoiceContextKey struct{}
+
+func withClaudeForcedToolChoice(ctx context.Context, forced bool) context.Context {
+	return context.WithValue(ctx, claudeForcedToolChoiceContextKey{}, forced)
+}
+
+func claudeForcedToolChoiceFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	forced, _ := ctx.Value(claudeForcedToolChoiceContextKey{}).(bool)
+	return forced
+}
+
 func resolveIncomingClaudeHeaders(ctx context.Context, incoming http.Header) http.Header {
 	resolved := make(http.Header)
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -183,7 +197,7 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 	b.WriteByte(';')
 
 	if cchSigning {
-		b.WriteString(" cch=00000;")
+		// Per-request CCH marker intentionally omitted; continuity metadata is preserved.
 	}
 	if workload != "" {
 		b.WriteString(" cc_workload=")
@@ -223,7 +237,7 @@ func resolveClaudeContinuityTags(
 	hasExecutionMetadata := helps.ClaudeExecutionMetadataFromContext(ctx)
 	sessionID := helps.ClaudeSessionIDFromContext(ctx)
 	if sessionID == "" && auth != nil {
-		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+		sessionID = helps.ClaudeAgentSessionUUIDForRequestWithFallback(incomingHeaders, payload, payload, confirmedClaudeCode, claudeDiagnosticsCredentialIdentity(auth))
 	}
 	if sessionID == "" || auth == nil {
 		return "", "", helps.ClaudeContinuityContext{}, false
@@ -287,7 +301,7 @@ func resolveClaudeContinuityTagsDoc(
 	sessionID := helps.ClaudeSessionIDFromContext(ctx)
 	if sessionID == "" && auth != nil {
 		payload := doc.Bytes()
-		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+		sessionID = helps.ClaudeAgentSessionUUIDForRequestWithFallback(incomingHeaders, payload, payload, confirmedClaudeCode, claudeDiagnosticsCredentialIdentity(auth))
 	}
 	if sessionID == "" || auth == nil {
 		return "", "", helps.ClaudeContinuityContext{}, false
@@ -1783,10 +1797,7 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 		}
 		if doc.Get("thinking").Exists() {
 			thinkingType := doc.Get("thinking.type").String()
-			if thinkingType == "adaptive" && !doc.Get("thinking.display").Exists() && !payloadTouchedDisplay {
-				_ = doc.Set("thinking.display", "updates")
-				changed = true
-			} else if thinkingType != "adaptive" && fableState.injectedDisplay && !payloadTouchedDisplay {
+			if thinkingType != "adaptive" && fableState.injectedDisplay && !payloadTouchedDisplay {
 				if doc.Delete("thinking.display") == nil {
 					changed = true
 				}
@@ -1823,17 +1834,11 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 			}
 		}
 		if !isProbeOrHelper {
-			if applyClaudeCloakThinkingDisplayDoc(doc, payloadTouchedDisplay) {
-				changed = true
-			}
+			// Display injection removed; caller display is preserved as-is.
 		}
 		return changed
 	}
 
-	if isClaudeOpus55Model(currentModel) && !doc.Get("fallbacks").Exists() && !payloadTouchedFallbacks {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-		changed = true
-	}
 	thinkingType := strings.ToLower(strings.TrimSpace(doc.Get("thinking.type").String()))
 	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
 	// Payload rules can disable thinking without touching display. Remove only
@@ -1843,12 +1848,6 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 			changed = true
 		}
 	}
-	if !isProbeOrHelper {
-		if applyClaudeCloakThinkingDisplayDoc(doc, payloadTouchedDisplay) {
-			changed = true
-		}
-	}
-
 	// Remove Reporting outcomes if CPA automatically injected it
 	if fableState.injectedReporting {
 		system := doc.Get("system")
@@ -2469,7 +2468,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	}
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
-	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	_ = (cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache) // unified cloak applies regardless
 	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
 	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
 	explicitNever := trimmedMode == "never" && !uncloak
@@ -2477,15 +2476,11 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
-		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode && !uncloak,
-		Uncloak:              uncloak,
-		ExplicitNever:        explicitNever,
-	}
-	if confirmedClaudeCode {
-		// Native Claude Code is always a passthrough client unless the
-		// credential explicitly opts out of Claude Code identity via never/uncloak.
-		policy.Cloak = false
-		return policy, settings
+		// Cloaking is the common Claude wire policy. Native-client detection only
+		// affects transport details; it must not create a body-shape bypass.
+		Cloak:         !uncloak && trimmedMode != "never",
+		Uncloak:       uncloak,
+		ExplicitNever: explicitNever,
 	}
 	switch trimmedMode {
 	case "always":
@@ -2493,9 +2488,8 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	case "never", "uncloak":
 		policy.Cloak = false
 	default:
-		// Auto applies the CLI cloak only to real Claude OAuth credentials,
-		// explicit fingerprint-profile opt-ins, or credentials with explicit cloak
-		// settings. Other API keys and delegated providers keep the caller shape.
+		// Auto uses the unified cloak for every Claude request unless the operator
+		// explicitly selected a no-cloak mode above.
 	}
 	return policy, settings
 }
@@ -2561,7 +2555,7 @@ func applyCloakingInternalDoc(
 	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheModeContext(ctx)
 	// Strict mode drops caller system prompts entirely, so nothing needs a
 	// destination and an unusable block cannot lose information.
-	if !settings.strictMode {
+	if !settings.strictMode && !claudeForcedToolChoiceFromContext(ctx) {
 		if errSystem := validateClaudeCallerSystemBlocks(doc.Get("system")); errSystem != nil {
 			return false, false, errSystem
 		}
@@ -2610,34 +2604,33 @@ func applyCloakingInternalDoc(
 	if isExplicit {
 		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
 	}
-	checkSystemInstructionsWithSigningModeAtDoc(
-		doc,
-		settings.strictMode,
-		cchSigning,
-		billingVersion,
-		"cli",
-		workload,
-		pinnedDate,
-		isSubagent,
-		prevReq,
-		promptID,
-		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
-		turnOriginArgs...,
-	)
+	if !claudeForcedToolChoiceFromContext(ctx) {
+		checkSystemInstructionsWithSigningModeAtDoc(
+			doc,
+			settings.strictMode,
+			cchSigning,
+			billingVersion,
+			"cli",
+			workload,
+			pinnedDate,
+			isSubagent,
+			prevReq,
+			promptID,
+			!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+			turnOriginArgs...,
+		)
+	}
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !doc.Get("fallbacks").Exists() {
 			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 	}
 	if !isProbeOrHelper {
-		applyClaudeCloakThinkingDisplayDoc(doc, false)
+		// Display injection removed; caller display is preserved as-is.
 	}
 
 	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
@@ -3740,14 +3733,14 @@ func shouldEnsureCacheControl(payload []byte, cloaked, confirmedClaudeCode bool,
 	if isExplicitPromptCacheMode(append([][]byte{payload}, candidates...)...) {
 		return false
 	}
-	return !confirmedClaudeCode && (cloaked || countCacheControls(payload) == 0)
+	return cloaked || (!confirmedClaudeCode && countCacheControls(payload) == 0)
 }
 
 func shouldEnsureCacheControlDoc(doc *ojson.Doc, cloaked, confirmedClaudeCode bool, candidates ...[]byte) bool {
 	if isExplicitPromptCacheModeDoc(doc, candidates...) {
 		return false
 	}
-	return !confirmedClaudeCode && (cloaked || countCacheControlsDoc(doc) == 0)
+	return cloaked || (!confirmedClaudeCode && countCacheControlsDoc(doc) == 0)
 }
 
 func countCacheControls(payload []byte) int {

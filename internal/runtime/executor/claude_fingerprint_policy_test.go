@@ -498,8 +498,8 @@ func TestClaudeExecutor_OfficialAPIKeyDefaultPreservesCallerCCH(t *testing.T) {
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller; cch=abcde;" {
-		t.Fatalf("caller billing/CCH = %q, want byte-preserved text", got)
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller;" {
+		t.Fatalf("caller billing = %q, want only CCH removed", got)
 	}
 	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "Keep this rule." {
 		t.Fatalf("caller system text = %q, want preserved", got)
@@ -548,14 +548,10 @@ func TestClaudeExecutor_OfficialAPIKeyClaudeCodeCLIFingerprintIncludesDiagnostic
 	if diagnostics := ojson.GetBytes(seenBody, "diagnostics"); !diagnostics.IsObject() {
 		t.Fatalf("diagnostics = %s, want object after fingerprint-profile opt-in", diagnostics.Raw)
 	}
-	// api.anthropic.com is the one API-key origin where native emits cch, so the
-	// opt-in must produce a finalized signature here.
+	// The opt-in must produce billing metadata without per-request CCH.
 	billing := ojson.GetBytes(seenBody, "system.0.text").String()
-	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
-		t.Fatalf("billing = %q, want signed cch on api.anthropic.com", billing)
-	}
-	if strings.Contains(billing, "cch=00000") {
-		t.Fatalf("billing = %q, want finalized cch signature", billing)
+	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || strings.Contains(billing, "cch=") {
+		t.Fatalf("billing = %q, want billing header without cch on api.anthropic.com", billing)
 	}
 	userID := ojson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) || ojson.Get(userID, "account_uuid").String() == "" {

@@ -44,7 +44,7 @@ func TestClaudeAgentSessionUUIDPreservesNativeSession(t *testing.T) {
 	}
 }
 
-func TestClaudeAgentSessionUUIDIgnoresUnconfirmedClaudeSignals(t *testing.T) {
+func TestClaudeAgentSessionUUIDAdoptsExplicitClaudeSessionHeader(t *testing.T) {
 	const nativeSessionID = "11111111-2222-4333-8444-555555555555"
 	metadata := map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "non-native-conversation"}
 	got := ClaudeAgentSessionUUIDForRequest(
@@ -54,11 +54,31 @@ func TestClaudeAgentSessionUUIDIgnoresUnconfirmedClaudeSignals(t *testing.T) {
 		false,
 		metadata,
 	)
-	if got == nativeSessionID {
-		t.Fatalf("ClaudeAgentSessionUUIDForRequest() = native session %q for unconfirmed caller", got)
+	if got != nativeSessionID {
+		t.Fatalf("ClaudeAgentSessionUUIDForRequest() = %q, want explicit session %q", got, nativeSessionID)
 	}
-	if repeated := ClaudeAgentSessionUUIDForRequest(nil, nil, nil, false, metadata); repeated != got {
-		t.Fatalf("derived session changed: first=%q repeated=%q", got, repeated)
+	if repeated := ClaudeAgentSessionUUIDForRequest(nil, nil, nil, false, metadata); repeated == got {
+		t.Fatalf("missing header unexpectedly reused explicit session %q", got)
+	}
+}
+
+func TestClaudeAgentSessionUUIDFallbackIsStableAndIgnoresMetadataUserID(t *testing.T) {
+	first := ClaudeAgentSessionUUIDForRequestWithFallback(
+		nil,
+		[]byte(`{"metadata":{"user_id":"{\"session_id\":\"caller-one\"}"}}`),
+		nil,
+		false,
+		"credential-session-cache-test",
+	)
+	second := ClaudeAgentSessionUUIDForRequestWithFallback(
+		nil,
+		[]byte(`{"metadata":{"user_id":"{\"session_id\":\"caller-two\"}"}}`),
+		nil,
+		false,
+		"credential-session-cache-test",
+	)
+	if first == "" || first != second {
+		t.Fatalf("fallback sessions = %q and %q, want one stable session", first, second)
 	}
 }
 

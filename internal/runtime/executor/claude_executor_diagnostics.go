@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/MoeForge/moego/ojson"
 )
 
 type claudeDiagnosticsRequestState struct {
@@ -58,13 +57,13 @@ func injectClaudeDiagnosticsWithState(body []byte, key string, sequence uint64, 
 		value = `{"previous_message_id":` + marshalJSONStringWithoutHTMLEscape(previousMessageID) + `}`
 	}
 
-	if diagnostics := ojson.GetBytesNoCopy(body, "diagnostics"); diagnostics.Exists() {
+	if diagnostics := ojson.GetBytes(body, "diagnostics"); diagnostics.Exists() {
 		updated, errSet := ojson.SetRawBytes(body, "diagnostics", []byte(value))
 		if errSet == nil {
 			return updated, claudeDiagnosticsRequestState{key: key, sequence: sequence, promptID: promptID}
 		}
 	}
-	if contextManagement := ojson.GetBytesNoCopy(body, "context_management"); contextManagement.Exists() {
+	if contextManagement := ojson.GetBytes(body, "context_management"); contextManagement.Exists() {
 		start := contextManagement.Index
 		insertAt := start + len(contextManagement.Raw)
 		if start >= 0 && insertAt >= start && insertAt <= len(body) && bytes.Equal(body[start:insertAt], []byte(contextManagement.Raw)) {
@@ -111,23 +110,30 @@ func claudeDiagnosticsCredentialIdentity(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
+func claudeSessionFallbackKey(auth *cliproxyauth.Auth, apiKey string) string {
+	if key := strings.TrimSpace(apiKey); key != "" {
+		return key
+	}
+	return claudeDiagnosticsCredentialIdentity(auth)
+}
+
 func claudeMessageIDFromResponse(data []byte) string {
-	return strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(data, "id").String()))
+	return strings.TrimSpace(ojson.GetBytes(data, "id").String())
 }
 
 func observeClaudeStreamJSONPayload(payload []byte, hasDataPrefix bool, messageID *string, completed *bool) {
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := ojson.ParseBytes(payload)
 	switch root.Get("type").String() {
 	case "message_start":
 		if id := strings.TrimSpace(root.Get("message.id").String()); id != "" {
-			*messageID = strings.Clone(id)
+			*messageID = id
 		}
 	case "message_stop":
 		*completed = true
 	case "message":
 		if !hasDataPrefix && strings.TrimSpace(root.Get("stop_reason").String()) != "" {
 			if id := strings.TrimSpace(root.Get("id").String()); id != "" {
-				*messageID = strings.Clone(id)
+				*messageID = id
 			}
 			*completed = true
 		}
@@ -158,7 +164,7 @@ func observeClaudeSSEEvent(rawEvent []byte, messageID *string, completed *bool, 
 		return
 	}
 	observeClaudeStreamJSONPayload(joined, true, messageID, completed)
-	if streamErr != nil && *streamErr == nil && util.ParseGJSONBytesNoCopy(joined).Get("type").String() == "error" {
+	if streamErr != nil && *streamErr == nil && ojson.ParseBytes(joined).Get("type").String() == "error" {
 		*streamErr = statusErr{code: 502, msg: string(joined)}
 	}
 }

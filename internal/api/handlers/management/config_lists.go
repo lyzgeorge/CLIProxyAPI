@@ -758,10 +758,11 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 			entry.Cloak = nil
 		} else {
 			type cloakPatch struct {
-				Mode           *string   `json:"mode"`
-				StrictMode     *bool     `json:"strict-mode"`
-				SensitiveWords *[]string `json:"sensitive-words"`
-				CacheUserID    *bool     `json:"cache-user-id"`
+				Mode              *string   `json:"mode"`
+				StrictMode        *bool     `json:"strict-mode"`
+				SensitiveWords    *[]string `json:"sensitive-words"`
+				CacheUserID       *bool     `json:"cache-user-id"`
+				RequestsPerMinute *int      `json:"requests-per-minute"`
 			}
 			var p cloakPatch
 			if errCloak := json.Unmarshal(body.Value.Cloak, &p); errCloak != nil {
@@ -795,6 +796,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 			}
 			if p.CacheUserID != nil {
 				entry.Cloak.CacheUserID = p.CacheUserID
+			}
+			if p.RequestsPerMinute != nil {
+				entry.Cloak.RequestsPerMinute = *p.RequestsPerMinute
 			}
 			entry.Cloak = config.NormalizeCloakConfig(entry.Cloak)
 		}

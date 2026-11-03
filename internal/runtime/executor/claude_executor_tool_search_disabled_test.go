@@ -88,10 +88,9 @@ func renderToolSearchExecutorGolden(t *testing.T) map[string]string {
 			if errSend != nil {
 				t.Fatalf("%s %s: %v", authName, path, errSend)
 			}
-			// OAuth cloaking derives metadata.user_id from a random device id,
-			// and the billing header's cch hash covers it.
+			// OAuth cloaking derives metadata.user_id from a random device id.
 			body, _ := ojson.DeleteBytes(upstream.body, "metadata.user_id")
-			golden[authName+"/"+path] = toolSearchExecutorGoldenCCH.ReplaceAllString(string(body), "cch=0;")
+			golden[authName+"/"+path] = string(body)
 		}
 	}
 	return golden

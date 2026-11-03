@@ -540,17 +540,49 @@ func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
 	return found
 }
 
+func claudeHelperProfileShape(body []byte) bool {
+	if len(body) == 0 || !helps.IsClaudeProbeOrHelperRequest(body) {
+		return false
+	}
+	model := ojson.GetBytesNoCopy(body, "model").String()
+	if !isClaudeHaikuModel(model) {
+		return false
+	}
+	return claudeToolChoiceForcesToolUse(body) || ojson.GetBytesNoCopy(body, "output_config.format.type").String() == "json_schema"
+}
+
+// ensureClaudeCodeOutputDefaults fills the effort sampling field that Claude
+// Code sends on ordinary cloaked turns. Temperature is omitted on ordinary
+// requests, while structured Haiku 4.5 helpers retain their measured value.
+// Caller-provided values remain intact; probes keep their measured shapes.
+func ensureClaudeCodeOutputDefaults(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	doc := ojson.NewDoc(body)
+	if claudeHelperProfileShape(body) && !isClaudeHaiku55Model(doc.Get("model").String()) && !doc.Get("temperature").Exists() {
+		_ = doc.Set("temperature", float64(1))
+	}
+	if helps.IsClaudeProbeOrHelperRequest(body) {
+		return doc.Bytes()
+	}
+	if claudeRequestSupportsEffort(body, nil) && !doc.Get("output_config.effort").Exists() {
+		_ = doc.Set("output_config.effort", "medium")
+	}
+	return doc.Bytes()
+}
+
 func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 	if len(body) > 0 {
 		if helps.IsClaudeProbeOrHelperRequest(body) {
 			return false
 		}
 		model := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "model").String()))
-		if isClaudeHaikuModel(model) {
+		if isClaudeHaikuModel(model) && !isClaudeHaiku55Model(model) {
 			return false
 		}
 		thinkingType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "thinking.type").String()))
-		if thinkingType == "disabled" {
+		if thinkingType == "disabled" && !claudeToolChoiceForcesToolUse(body) {
 			return false
 		}
 	}
@@ -967,22 +999,16 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 func disableThinkingIfToolChoiceForcedDoc(doc *ojson.Doc) bool {
 	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
 	if claudeToolChoiceForcesToolUseDoc(doc) {
-		changed := false
-		// Remove thinking configuration entirely to avoid API error
-		if doc.Delete("thinking") == nil {
-			changed = true
-		}
-		// Adaptive thinking may also set output_config.effort; remove it to avoid
-		// leaking thinking controls when tool_choice forces tool use.
-		if doc.Delete("output_config.effort") == nil {
-			changed = true
+		// Native Claude Code sends an explicit disabled thinking object on forced
+		// tool requests and keeps output_config.effort alongside it.
+		thinking := doc.Get("thinking")
+		if !thinking.Exists() || thinking.Get("type").String() != "disabled" {
+			_ = doc.SetRawBytes("thinking", []byte(`{"type":"disabled"}`))
 		}
 		if oc := doc.Get("output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			if doc.Delete("output_config") == nil {
-				changed = true
-			}
+			_ = doc.Delete("output_config")
 		}
-		return changed
+		return true
 	}
 	return false
 }
