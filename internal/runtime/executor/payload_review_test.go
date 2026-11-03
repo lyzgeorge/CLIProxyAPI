@@ -188,16 +188,16 @@ func TestClaudePayloadConditionsObserveBuiltinThinkingRemoval(t *testing.T) {
 		}}
 		payload := []byte(`{"model":"claude-opus-5","max_tokens":100,"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"},"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
 		body := executeClaudeContextManagementRequest(t, cfg, payload, stream)
-		if got := ojson.GetBytes(body, "thinking.type").String(); got != "disabled" {
-			t.Fatalf("builtin did not disable forced-tool thinking: got %q, body=%s", got, body)
+		if ojson.GetBytes(body, "thinking").Exists() {
+			t.Fatalf("builtin did not remove forced-tool thinking: %s", body)
 		}
 		for _, prefix := range []string{"default", "default_raw", "override", "override_raw"} {
-			if !ojson.GetBytes(body, prefix+"_unmatched").Bool() || ojson.GetBytes(body, prefix+"_matched").Exists() {
+			if !ojson.GetBytes(body, prefix+"_matched").Bool() || ojson.GetBytes(body, prefix+"_unmatched").Exists() {
 				t.Fatalf("%s matched pre-builtin conditions (stream=%v): %s", prefix, stream, body)
 			}
 		}
-		if !ojson.GetBytes(body, "metadata").Exists() || ojson.GetBytes(body, "system").Exists() {
-			t.Fatalf("filters did not preserve metadata for disabled thinking (stream=%v): %s", stream, body)
+		if ojson.GetBytes(body, "metadata").Exists() || !ojson.GetBytes(body, "system").Exists() {
+			t.Fatalf("filters matched pre-builtin conditions (stream=%v): %s", stream, body)
 		}
 	}
 }
